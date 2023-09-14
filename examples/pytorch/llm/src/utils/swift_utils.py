@@ -4,7 +4,7 @@ from typing import Any, Dict
 from torch.nn import Module
 
 from swift import (AdapterConfig, LoRAConfig, ResTuningConfig, Swift,
-                   SwiftConfig, SwiftTuners, get_logger)
+                   SwiftConfig, SwiftTuners, get_logger, PromptConfig)
 from .model import MODEL_MAPPING
 from .utils import find_all_linear_for_lora
 
@@ -40,6 +40,14 @@ def prepare_model(model: Module, args) -> Module:
             )
             logger.info(f'adapter_config: {adapter_config}')
             swift_config['adapter'] = adapter_config
+        elif sft_type.lower() == SwiftTuners.PROMPT.lower():
+            prompt_config = PromptConfig(
+                dim=model.config.hidden_size,
+                prompt_length=args.prompt_length,
+                **MODEL_MAPPING[args.model_type]['prompt_TM']
+            )
+            logger.info(f'prompt_config: {prompt_config}')
+            swift_config['prompt'] = prompt_config
         elif sft_type.lower() == SwiftTuners.RESTUNING.lower():
             restuner_config = ResTuningConfig(
                 dims=model.config.hidden_size,

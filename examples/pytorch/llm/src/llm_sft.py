@@ -75,6 +75,7 @@ class SftArguments:
     lora_alpha: int = 32
     lora_dropout_p: float = 0.
     adapter_length: int = 32
+    prompt_length: int = 16
 
     gradient_checkpointing: bool = False
     batch_size: int = 1
@@ -150,7 +151,8 @@ class SftArguments:
         all_types = [
             SwiftTuners.LORA.lower(),
             SwiftTuners.ADAPTER.lower(),
-            SwiftTuners.RESTUNING.lower()
+            SwiftTuners.RESTUNING.lower(),
+            SwiftTuners.PROMPT.lower(),
         ] + ['full']
         sft_type = [_type.strip() for _type in self.sft_type.split(',')]
         assert all([_type.lower() in all_types for _type in sft_type]), \

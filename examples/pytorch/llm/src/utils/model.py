@@ -184,6 +184,35 @@ class AdapterTM(NamedTuple):
     polylm = ['mlp']
 
 
+class PromptTM(NamedTuple):
+    # default adapter target modules.
+    baichuan = {
+        'target_modules': r'.*layers\.\d+$',
+        'embedding_pos': 0,
+        'attention_mask_pos': 'attention_mask',
+    }
+    chatglm2 = {
+        'target_modules': r'.*layers\.\d+$',
+        'embedding_pos': 0,
+        'attention_mask_pos': 1,
+    }
+    llama2 = {
+        'target_modules': r'.*layers\.\d+$',
+        'embedding_pos': 0,
+        'attention_mask_pos': 'attention_mask',
+    }
+    qwen = {
+        'target_modules': r'.*transformer.h\.\d+$',
+        'embedding_pos': 0,
+        'attention_mask_pos': 'attention_mask',
+    }
+    polylm = {
+        'target_modules': r'.*transformer.h\.\d+$',
+        'embedding_pos': 0,
+        'attention_mask_pos': 'attention_mask',
+    }
+
+
 class ResTunerTM(NamedTuple):
     # default res-tuning config.
     baichuan = {
@@ -234,6 +263,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.qwen,
         'adapter_TM': AdapterTM.qwen,
         'restuner_TM': ResTunerTM.qwen,
+        'prompt_TM': PromptTM.qwen,
     },
     'qwen-7b-chat': {
         'model_id': 'qwen/Qwen-7B-Chat',
@@ -243,6 +273,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.qwen,
         'adapter_TM': AdapterTM.qwen,
         'restuner_TM': ResTunerTM.qwen,
+        'prompt_TM': PromptTM.qwen,
     },
     'qwen-vl': {
         'model_id': 'qwen/Qwen-VL',
@@ -251,6 +282,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.qwen,
         'adapter_TM': AdapterTM.qwen,
         'restuner_TM': ResTunerTM.qwen,
+        'prompt_TM': PromptTM.qwen,
     },
     'qwen-vl-chat': {
         'model_id': 'qwen/Qwen-VL-Chat',
@@ -260,6 +292,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.qwen,
         'adapter_TM': AdapterTM.qwen,
         'restuner_TM': ResTunerTM.qwen,
+        'prompt_TM': PromptTM.qwen,
     },
     'baichuan-7b': {
         'model_id': 'baichuan-inc/baichuan-7B',
@@ -267,6 +300,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.baichuan,
         'adapter_TM': AdapterTM.baichuan,
         'restuner_TM': ResTunerTM.baichuan,
+        'prompt_TM': PromptTM.baichuan,
     },
     'baichuan-13b': {
         'model_id': 'baichuan-inc/Baichuan-13B-Base',
@@ -275,6 +309,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.baichuan,
         'adapter_TM': AdapterTM.baichuan,
         'restuner_TM': ResTunerTM.baichuan,
+        'prompt_TM': PromptTM.baichuan,
     },
     'baichuan-13b-chat': {
         'model_id': 'baichuan-inc/Baichuan-13B-Chat',
@@ -283,6 +318,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.baichuan,
         'adapter_TM': AdapterTM.baichuan,
         'restuner_TM': ResTunerTM.baichuan,
+        'prompt_TM': PromptTM.baichuan,
     },
     'chatglm2-6b': {
         'model_id': 'ZhipuAI/chatglm2-6b',
@@ -292,6 +328,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.chatglm2,
         'adapter_TM': AdapterTM.chatglm2,
         'restuner_TM': ResTunerTM.chatglm2,
+        'prompt_TM': PromptTM.chatglm2,
     },
     'chatglm2-6b-32k': {
         'model_id': 'ZhipuAI/chatglm2-6b-32k',
@@ -300,6 +337,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.chatglm2,
         'adapter_TM': AdapterTM.chatglm2,
         'restuner_TM': ResTunerTM.chatglm2,
+        'prompt_TM': PromptTM.chatglm2,
     },
     'llama2-7b': {
         'model_id': 'modelscope/Llama-2-7b-ms',
@@ -308,6 +346,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.llama2,
         'adapter_TM': AdapterTM.llama2,
         'restuner_TM': ResTunerTM.llama2,
+        'prompt_TM': PromptTM.llama2,
     },
     'llama2-13b': {
         'model_id': 'modelscope/Llama-2-13b-ms',
@@ -317,6 +356,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.llama2,
         'adapter_TM': AdapterTM.llama2,
         'restuner_TM': ResTunerTM.llama2,
+        'prompt_TM': PromptTM.llama2,
     },
     'llama2-70b': {
         'model_id': 'modelscope/Llama-2-70b-ms',
@@ -325,6 +365,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.llama2,
         'adapter_TM': AdapterTM.llama2,
         'restuner_TM': ResTunerTM.llama2,
+        'prompt_TM': PromptTM.llama2,
     },
     'llama2-7b-chat': {
         'model_id': 'modelscope/Llama-2-7b-chat-ms',
@@ -334,6 +375,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.llama2,
         'adapter_TM': AdapterTM.llama2,
         'restuner_TM': ResTunerTM.llama2,
+        'prompt_TM': PromptTM.llama2,
     },
     'llama2-13b-chat': {
         'model_id': 'modelscope/Llama-2-13b-chat-ms',
@@ -344,6 +386,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.llama2,
         'adapter_TM': AdapterTM.llama2,
         'restuner_TM': ResTunerTM.llama2,
+        'prompt_TM': PromptTM.llama2,
     },
     'llama2-70b-chat': {
         'model_id': 'modelscope/Llama-2-70b-chat-ms',
@@ -354,6 +397,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.llama2,
         'adapter_TM': AdapterTM.llama2,
         'restuner_TM': ResTunerTM.llama2,
+        'prompt_TM': PromptTM.llama2,
     },
     'openbuddy-llama2-13b': {
         'model_id': 'OpenBuddy/openbuddy-llama2-13b-v8.1-fp16',
@@ -362,12 +406,14 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.llama2,
         'adapter_TM': AdapterTM.llama2,
         'restuner_TM': ResTunerTM.llama2,
+        'prompt_TM': PromptTM.llama2,
     },
     'openbuddy-llama-65b': {
         'model_id': 'OpenBuddy/openbuddy-llama-65b-v8-bf16',
         'revision': 'v1.0.0',
         'template': 'openbuddy-llama',
         'lora_TM': LoRATM.llama2,
+        'prompt_TM': PromptTM.llama2,
     },
     'openbuddy-llama2-70b': {
         'model_id': 'OpenBuddy/openbuddy-llama2-70b-v10.1-bf16',
@@ -376,6 +422,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.llama2,
         'adapter_TM': AdapterTM.llama2,
         'restuner_TM': ResTunerTM.llama2,
+        'prompt_TM': PromptTM.llama2,
     },
     'polylm-13b': {
         'model_id': 'damo/nlp_polylm_13b_text_generation',
@@ -384,6 +431,7 @@ MODEL_MAPPING = {
         'lora_TM': LoRATM.polylm,
         'adapter_TM': AdapterTM.polylm,
         'restuner_TM': ResTunerTM.polylm,
+        'prompt_TM': PromptTM.polylm,
     },
     'baichuan2-7b': {
         'model_id': 'baichuan-inc/Baichuan2-7B-Base',
