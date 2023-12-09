@@ -978,7 +978,7 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
                 break
 
         if accelerator.is_main_process:
-            if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
+            if args.validation_prompt is not None and (epoch+1) % args.validation_epochs == 0:
                 logger.info(
                     f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
                     f" {args.validation_prompt}."
@@ -1002,7 +1002,7 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
                     vae=vae,
                     text_encoder=accelerator.unwrap_model(text_encoder_one),
                     text_encoder_2=accelerator.unwrap_model(text_encoder_two),
-                    unet=accelerator.unwrap_model(unet),
+                    unet=accelerator.unwrap_model(unet.base_model),
                     revision=args.model_revision,
                     variant=args.variant,
                     torch_dtype=weight_dtype,
@@ -1058,23 +1058,25 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
         unet = unet.to(torch.float32)
-        unet_lora_layers = get_peft_model_state_dict(unet)
+        unet.save_pretrained(os.path.join(args.output_dir, 'unet'))
 
         if args.train_text_encoder:
             text_encoder_one = accelerator.unwrap_model(text_encoder_one)
-            text_encoder_lora_layers = get_peft_model_state_dict(text_encoder_one.to(torch.float32))
+            # text_encoder_lora_layers = text_encoder_one.state_dict() # get_peft_model_state_dict(text_encoder_one.to(torch.float32))
+            text_encoder_one.save_pretrained(os.path.join(args.output_dir, 'text_encoder1'))
             text_encoder_two = accelerator.unwrap_model(text_encoder_two)
-            text_encoder_2_lora_layers = get_peft_model_state_dict(text_encoder_two.to(torch.float32))
+            # text_encoder_2_lora_layers = text_encoder_two.state_dict() # get_peft_model_state_dict(text_encoder_two.to(torch.float32))
+            text_encoder_2_lora_layers.save_pretrained(os.path.join(args.output_dir, 'text_encoder2'))
         else:
             text_encoder_lora_layers = None
             text_encoder_2_lora_layers = None
 
-        StableDiffusionXLPipeline.save_lora_weights(
-            save_directory=args.output_dir,
-            unet_lora_layers=unet_lora_layers,
-            text_encoder_lora_layers=text_encoder_lora_layers,
-            text_encoder_2_lora_layers=text_encoder_2_lora_layers,
-        )
+        # StableDiffusionXLPipeline.save_lora_weights(
+        #     save_directory=args.output_dir,
+        #     unet_lora_layers=unet_lora_layers,
+        #     text_encoder_lora_layers=text_encoder_lora_layers,
+        #     text_encoder_2_lora_layers=text_encoder_2_lora_layers,
+        # )
 
         # Final inference
         # Load previous pipeline
@@ -1107,7 +1109,11 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
         pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config, **scheduler_args)
 
         # load attention processors
-        pipeline.load_lora_weights(args.output_dir)
+        pipeline.unet = Swift.from_pretrained(pipeline.unet, os.path.join(args.output_dir, 'unet'))
+        if args.train_text_encoder:
+            pipeline.text_encoder_one = Swift.from_pretrained(pipeline.text_encoder_one, os.path.join(args.output_dir, 'text_encoder1'))
+            pipeline.text_encoder_two = Swift.from_pretrained(pipeline.text_encoder_two, os.path.join(args.output_dir, 'text_encoder2'))
+        # pipeline.load_lora_weights(args.output_dir)
 
         # run inference
         images = []
@@ -1118,6 +1124,8 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
                 pipeline(args.validation_prompt, num_inference_steps=25, generator=generator).images[0]
                 for _ in range(args.num_validation_images)
             ]
+            for idx, image in enumerate(images):
+                image.save(f'./{idx}.jpg')
 
             for tracker in accelerator.trackers:
                 if tracker.name == "tensorboard":

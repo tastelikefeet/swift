@@ -5,10 +5,13 @@ from typing import Dict
 from pathlib import Path
 import numpy as np
 import torch
+import itertools
 import torchvision.transforms as transforms
 from decord import VideoReader
 from torch.utils.data.dataset import Dataset
 from tqdm.auto import tqdm
+from PIL import Image
+from PIL.ImageOps import exif_transpose
 
 
 class PromptDataset(Dataset):

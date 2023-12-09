@@ -181,6 +181,7 @@ class DreamBoothArguments:
     with_prior_preservation: bool = None
     num_class_images: int = None
     repeats: int = 1
+    prior_loss_weight: float = 1.0
 
 
 @dataclass
@@ -227,7 +228,7 @@ class SDXLDreamBoothArguments(SDXLArguments, DreamBoothArguments, LoRAArguments,
     dataset_name: str = None
     dataset_config_name: str = None
     validation_prompt: str = None
-    num_validation_images: int = None
+    num_validation_images: int = 5
     validation_epochs: int = None
     output_dir: str = None
     train_text_encoder: bool = False
@@ -244,9 +245,11 @@ class SDXLDreamBoothArguments(SDXLArguments, DreamBoothArguments, LoRAArguments,
     scale_lr: bool = False
     lr_scheduler: str = 'constant'
     snr_gamma: float = None
+    lr_power: float = 1.0
     lr_warmup_steps: int = 500
     lr_num_cycles: int = 1
     dataloader_num_workers: int = 1
+    max_train_steps: int = None
     optimizer: str = 'AdamW'
     use_8bit_adam: bool = False
     adam_beta1: float = 0.9
@@ -273,7 +276,7 @@ class SDXLDreamBoothArguments(SDXLArguments, DreamBoothArguments, LoRAArguments,
             'choices': ["no", "fp32", "fp16", "bf16"],
         }
     )
-    enable_xformers_memory_efficient_attention: bool = True
+    enable_xformers_memory_efficient_attention: bool = False
     sft_type: str = field(
         default='lora', metadata={'choices': ['lora', 'full']})
 
