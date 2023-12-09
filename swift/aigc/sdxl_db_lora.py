@@ -28,10 +28,7 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
-from swift.aigc.utils import SDXLDreamBoothArguments
 from accelerate import Accelerator
-from swift.aigc.utils.datasets import PromptDataset, DreamBoothDataset
-from modelscope import snapshot_download
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
 from huggingface_hub import create_repo, upload_folder
@@ -59,58 +56,27 @@ from diffusers.training_utils import compute_snr
 from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 
+# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
+check_min_version("0.25.0.dev0")
 
 logger = get_logger(__name__)
 
 
-# TODO: This function should be removed once training scripts are rewritten in PEFT
-def text_encoder_lora_state_dict(text_encoder):
-    state_dict = {}
-
-    def text_encoder_attn_modules(text_encoder):
-        from transformers import CLIPTextModel, CLIPTextModelWithProjection
-
-        attn_modules = []
-
-        if isinstance(text_encoder, (CLIPTextModel, CLIPTextModelWithProjection)):
-            for i, layer in enumerate(text_encoder.text_model.encoder.layers):
-                name = f"text_model.encoder.layers.{i}.self_attn"
-                mod = layer.self_attn
-                attn_modules.append((name, mod))
-
-        return attn_modules
-
-    for name, module in text_encoder_attn_modules(text_encoder):
-        for k, v in module.q_proj.lora_linear_layer.state_dict().items():
-            state_dict[f"{name}.q_proj.lora_linear_layer.{k}"] = v
-
-        for k, v in module.k_proj.lora_linear_layer.state_dict().items():
-            state_dict[f"{name}.k_proj.lora_linear_layer.{k}"] = v
-
-        for k, v in module.v_proj.lora_linear_layer.state_dict().items():
-            state_dict[f"{name}.v_proj.lora_linear_layer.{k}"] = v
-
-        for k, v in module.out_proj.lora_linear_layer.state_dict().items():
-            state_dict[f"{name}.out_proj.lora_linear_layer.{k}"] = v
-
-    return state_dict
-
-
 def save_model_card(
-    repo_id: str,
-    images=None,
-    base_model=str,
-    train_text_encoder=False,
-    instance_prompt=str,
-    validation_prompt=str,
-    repo_folder=None,
-    vae_path=None,
+        repo_id: str,
+        images=None,
+        base_model=str,
+        train_text_encoder=False,
+        instance_prompt=str,
+        validation_prompt=str,
+        repo_folder=None,
+        vae_path=None,
 ):
     img_str = "widget:\n" if images else ""
     for i, image in enumerate(images):
         image.save(os.path.join(repo_folder, f"image_{i}.png"))
         img_str += f"""
-        - text: '{validation_prompt if validation_prompt else ' ' }'
+        - text: '{validation_prompt if validation_prompt else ' '}'
           output:
             url:
                 "image_{i}.png"
@@ -163,10 +129,10 @@ Weights for this model are available in Safetensors format.
 
 
 def import_model_class_from_model_name_or_path(
-    model_id_or_path: str, revision: str, subfolder: str = "text_encoder"
+        pretrained_model_name_or_path: str, revision: str, subfolder: str = "text_encoder"
 ):
     text_encoder_config = PretrainedConfig.from_pretrained(
-        model_id_or_path, subfolder=subfolder, revision=revision
+        pretrained_model_name_or_path, subfolder=subfolder, revision=revision
     )
     model_class = text_encoder_config.architectures[0]
 
@@ -183,6 +149,406 @@ def import_model_class_from_model_name_or_path(
 
 
 def parse_args(input_args=None):
+    parser = argparse.ArgumentParser(description="Simple example of a training script.")
+    parser.add_argument(
+        "--pretrained_model_name_or_path",
+        type=str,
+        default=None,
+        required=True,
+        help="Path to pretrained model or model identifier from huggingface.co/models.",
+    )
+    parser.add_argument(
+        "--pretrained_vae_model_name_or_path",
+        type=str,
+        default=None,
+        help="Path to pretrained VAE model with better numerical stability. More details: https://github.com/huggingface/diffusers/pull/4038.",
+    )
+    parser.add_argument(
+        "--revision",
+        type=str,
+        default=None,
+        required=False,
+        help="Revision of pretrained model identifier from huggingface.co/models.",
+    )
+    parser.add_argument(
+        "--variant",
+        type=str,
+        default=None,
+        help="Variant of the model files of the pretrained model identifier from huggingface.co/models, 'e.g.' fp16",
+    )
+    parser.add_argument(
+        "--dataset_name",
+        type=str,
+        default=None,
+        help=(
+            "The name of the Dataset (from the HuggingFace hub) containing the training data of instance images (could be your own, possibly private,"
+            " dataset). It can also be a path pointing to a local copy of a dataset in your filesystem,"
+            " or to a folder containing files that 🤗 Datasets can understand."
+        ),
+    )
+    parser.add_argument(
+        "--dataset_config_name",
+        type=str,
+        default=None,
+        help="The config of the Dataset, leave as None if there's only one config.",
+    )
+    parser.add_argument(
+        "--instance_data_dir",
+        type=str,
+        default=None,
+        help=("A folder containing the training data. "),
+    )
+
+    parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default=None,
+        help="The directory where the downloaded models and datasets will be stored.",
+    )
+
+    parser.add_argument(
+        "--image_column",
+        type=str,
+        default="image",
+        help="The column of the dataset containing the target image. By "
+             "default, the standard Image Dataset maps out 'file_name' "
+             "to 'image'.",
+    )
+    parser.add_argument(
+        "--caption_column",
+        type=str,
+        default=None,
+        help="The column of the dataset containing the instance prompt for each image",
+    )
+
+    parser.add_argument("--repeats", type=int, default=1, help="How many times to repeat the training data.")
+
+    parser.add_argument(
+        "--class_data_dir",
+        type=str,
+        default=None,
+        required=False,
+        help="A folder containing the training data of class images.",
+    )
+    parser.add_argument(
+        "--instance_prompt",
+        type=str,
+        default=None,
+        required=True,
+        help="The prompt with identifier specifying the instance, e.g. 'photo of a TOK dog', 'in the style of TOK'",
+    )
+    parser.add_argument(
+        "--class_prompt",
+        type=str,
+        default=None,
+        help="The prompt to specify images in the same class as provided instance images.",
+    )
+    parser.add_argument(
+        "--validation_prompt",
+        type=str,
+        default=None,
+        help="A prompt that is used during validation to verify that the model is learning.",
+    )
+    parser.add_argument(
+        "--num_validation_images",
+        type=int,
+        default=4,
+        help="Number of images that should be generated during validation with `validation_prompt`.",
+    )
+    parser.add_argument(
+        "--validation_epochs",
+        type=int,
+        default=50,
+        help=(
+            "Run dreambooth validation every X epochs. Dreambooth validation consists of running the prompt"
+            " `args.validation_prompt` multiple times: `args.num_validation_images`."
+        ),
+    )
+    parser.add_argument(
+        "--with_prior_preservation",
+        default=False,
+        action="store_true",
+        help="Flag to add prior preservation loss.",
+    )
+    parser.add_argument("--prior_loss_weight", type=float, default=1.0, help="The weight of prior preservation loss.")
+    parser.add_argument(
+        "--num_class_images",
+        type=int,
+        default=100,
+        help=(
+            "Minimal class images for prior preservation loss. If there are not enough images already present in"
+            " class_data_dir, additional images will be sampled with class_prompt."
+        ),
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="lora-dreambooth-model",
+        help="The output directory where the model predictions and checkpoints will be written.",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument(
+        "--resolution",
+        type=int,
+        default=1024,
+        help=(
+            "The resolution for input images, all the images in the train/validation dataset will be resized to this"
+            " resolution"
+        ),
+    )
+    parser.add_argument(
+        "--crops_coords_top_left_h",
+        type=int,
+        default=0,
+        help=("Coordinate for (the height) to be included in the crop coordinate embeddings needed by SDXL UNet."),
+    )
+    parser.add_argument(
+        "--crops_coords_top_left_w",
+        type=int,
+        default=0,
+        help=("Coordinate for (the height) to be included in the crop coordinate embeddings needed by SDXL UNet."),
+    )
+    parser.add_argument(
+        "--center_crop",
+        default=False,
+        action="store_true",
+        help=(
+            "Whether to center crop the input images to the resolution. If not set, the images will be randomly"
+            " cropped. The images will be resized to the resolution first before cropping."
+        ),
+    )
+    parser.add_argument(
+        "--train_text_encoder",
+        action="store_true",
+        help="Whether to train the text encoder. If set, the text encoder should be float32 precision.",
+    )
+    parser.add_argument(
+        "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
+    )
+    parser.add_argument(
+        "--sample_batch_size", type=int, default=4, help="Batch size (per device) for sampling images."
+    )
+    parser.add_argument("--num_train_epochs", type=int, default=1)
+    parser.add_argument(
+        "--max_train_steps",
+        type=int,
+        default=None,
+        help="Total number of training steps to perform.  If provided, overrides num_train_epochs.",
+    )
+    parser.add_argument(
+        "--checkpointing_steps",
+        type=int,
+        default=500,
+        help=(
+            "Save a checkpoint of the training state every X updates. These checkpoints can be used both as final"
+            " checkpoints in case they are better than the last checkpoint, and are also suitable for resuming"
+            " training using `--resume_from_checkpoint`."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoints_total_limit",
+        type=int,
+        default=None,
+        help=("Max number of checkpoints to store."),
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Whether training should be resumed from a previous checkpoint. Use a path saved by"
+            ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
+        ),
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Number of updates steps to accumulate before performing a backward/update pass.",
+    )
+    parser.add_argument(
+        "--gradient_checkpointing",
+        action="store_true",
+        help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-4,
+        help="Initial learning rate (after the potential warmup period) to use.",
+    )
+
+    parser.add_argument(
+        "--text_encoder_lr",
+        type=float,
+        default=5e-6,
+        help="Text encoder learning rate to use.",
+    )
+    parser.add_argument(
+        "--scale_lr",
+        action="store_true",
+        default=False,
+        help="Scale the learning rate by the number of GPUs, gradient accumulation steps, and batch size.",
+    )
+    parser.add_argument(
+        "--lr_scheduler",
+        type=str,
+        default="constant",
+        help=(
+            'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
+            ' "constant", "constant_with_warmup"]'
+        ),
+    )
+
+    parser.add_argument(
+        "--snr_gamma",
+        type=float,
+        default=None,
+        help="SNR weighting gamma to be used if rebalancing the loss. Recommended value is 5.0. "
+             "More details here: https://arxiv.org/abs/2303.09556.",
+    )
+    parser.add_argument(
+        "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
+    )
+    parser.add_argument(
+        "--lr_num_cycles",
+        type=int,
+        default=1,
+        help="Number of hard resets of the lr in cosine_with_restarts scheduler.",
+    )
+    parser.add_argument("--lr_power", type=float, default=1.0, help="Power factor of the polynomial scheduler.")
+    parser.add_argument(
+        "--dataloader_num_workers",
+        type=int,
+        default=0,
+        help=(
+            "Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."
+        ),
+    )
+
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="AdamW",
+        help=('The optimizer type to use. Choose between ["AdamW", "prodigy"]'),
+    )
+
+    parser.add_argument(
+        "--use_8bit_adam",
+        action="store_true",
+        help="Whether or not to use 8-bit Adam from bitsandbytes. Ignored if optimizer is not set to AdamW",
+    )
+
+    parser.add_argument(
+        "--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam and Prodigy optimizers."
+    )
+    parser.add_argument(
+        "--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam and Prodigy optimizers."
+    )
+    parser.add_argument(
+        "--prodigy_beta3",
+        type=float,
+        default=None,
+        help="coefficients for computing the Prodidy stepsize using running averages. If set to None, "
+             "uses the value of square root of beta2. Ignored if optimizer is adamW",
+    )
+    parser.add_argument("--prodigy_decouple", type=bool, default=True, help="Use AdamW style decoupled weight decay")
+    parser.add_argument("--adam_weight_decay", type=float, default=1e-04, help="Weight decay to use for unet params")
+    parser.add_argument(
+        "--adam_weight_decay_text_encoder", type=float, default=1e-03, help="Weight decay to use for text_encoder"
+    )
+
+    parser.add_argument(
+        "--adam_epsilon",
+        type=float,
+        default=1e-08,
+        help="Epsilon value for the Adam optimizer and Prodigy optimizers.",
+    )
+
+    parser.add_argument(
+        "--prodigy_use_bias_correction",
+        type=bool,
+        default=True,
+        help="Turn on Adam's bias correction. True by default. Ignored if optimizer is adamW",
+    )
+    parser.add_argument(
+        "--prodigy_safeguard_warmup",
+        type=bool,
+        default=True,
+        help="Remove lr from the denominator of D estimate to avoid issues during warm-up stage. True by default. "
+             "Ignored if optimizer is adamW",
+    )
+    parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
+    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
+    parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
+    parser.add_argument(
+        "--hub_model_id",
+        type=str,
+        default=None,
+        help="The name of the repository to keep in sync with the local `output_dir`.",
+    )
+    parser.add_argument(
+        "--logging_dir",
+        type=str,
+        default="logs",
+        help=(
+            "[TensorBoard](https://www.tensorflow.org/tensorboard) log directory. Will default to"
+            " *output_dir/runs/**CURRENT_DATETIME_HOSTNAME***."
+        ),
+    )
+    parser.add_argument(
+        "--allow_tf32",
+        action="store_true",
+        help=(
+            "Whether or not to allow TF32 on Ampere GPUs. Can be used to speed up training. For more information, see"
+            " https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices"
+        ),
+    )
+    parser.add_argument(
+        "--report_to",
+        type=str,
+        default="tensorboard",
+        help=(
+            'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
+            ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
+        ),
+    )
+    parser.add_argument(
+        "--mixed_precision",
+        type=str,
+        default=None,
+        choices=["no", "fp16", "bf16"],
+        help=(
+            "Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
+            " 1.10.and an Nvidia Ampere GPU.  Default to the value of accelerate config of the current system or the"
+            " flag passed with the `accelerate.launch` command. Use this argument to override the accelerate config."
+        ),
+    )
+    parser.add_argument(
+        "--prior_generation_precision",
+        type=str,
+        default=None,
+        choices=["no", "fp32", "fp16", "bf16"],
+        help=(
+            "Choose prior generation precision between fp32, fp16 and bf16 (bfloat16). Bf16 requires PyTorch >="
+            " 1.10.and an Nvidia Ampere GPU.  Default to  fp16 if a GPU is available else fp32."
+        ),
+    )
+    parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
+    parser.add_argument(
+        "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
+    )
+    parser.add_argument(
+        "--rank",
+        type=int,
+        default=4,
+        help=("The dimension of the LoRA update matrices."),
+    )
+
+    if input_args is not None:
+        args = parser.parse_args(input_args)
+    else:
+        args = parser.parse_args()
 
     if args.dataset_name is None and args.instance_data_dir is None:
         raise ValueError("Specify either `--dataset_name` or `--instance_data_dir`")
@@ -209,6 +575,151 @@ def parse_args(input_args=None):
     return args
 
 
+class DreamBoothDataset(Dataset):
+    """
+    A dataset to prepare the instance and class images with the prompts for fine-tuning the model.
+    It pre-processes the images.
+    """
+
+    def __init__(
+            self,
+            args,
+            instance_data_root,
+            instance_prompt,
+            class_prompt,
+            class_data_root=None,
+            class_num=None,
+            size=1024,
+            repeats=1,
+            center_crop=False,
+    ):
+        self.size = size
+        self.center_crop = center_crop
+
+        self.instance_prompt = instance_prompt
+        self.custom_instance_prompts = None
+        self.class_prompt = class_prompt
+
+        # if --dataset_name is provided or a metadata jsonl file is provided in the local --instance_data directory,
+        # we load the training data using load_dataset
+        if args.dataset_name is not None:
+            try:
+                from datasets import load_dataset
+            except ImportError:
+                raise ImportError(
+                    "You are trying to load your data using the datasets library. If you wish to train using custom "
+                    "captions please install the datasets library: `pip install datasets`. If you wish to load a "
+                    "local folder containing images only, specify --instance_data_dir instead."
+                )
+            # Downloading and loading a dataset from the hub.
+            # See more about loading custom images at
+            # https://huggingface.co/docs/datasets/v2.0.0/en/dataset_script
+            dataset = load_dataset(
+                args.dataset_name,
+                args.dataset_config_name,
+                cache_dir=args.cache_dir,
+            )
+            # Preprocessing the datasets.
+            column_names = dataset["train"].column_names
+
+            # 6. Get the column names for input/target.
+            if args.image_column is None:
+                image_column = column_names[0]
+                logger.info(f"image column defaulting to {image_column}")
+            else:
+                image_column = args.image_column
+                if image_column not in column_names:
+                    raise ValueError(
+                        f"`--image_column` value '{args.image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
+                    )
+            instance_images = dataset["train"][image_column]
+
+            if args.caption_column is None:
+                logger.info(
+                    "No caption column provided, defaulting to instance_prompt for all images. If your dataset "
+                    "contains captions/prompts for the images, make sure to specify the "
+                    "column as --caption_column"
+                )
+                self.custom_instance_prompts = None
+            else:
+                if args.caption_column not in column_names:
+                    raise ValueError(
+                        f"`--caption_column` value '{args.caption_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
+                    )
+                custom_instance_prompts = dataset["train"][args.caption_column]
+                # create final list of captions according to --repeats
+                self.custom_instance_prompts = []
+                for caption in custom_instance_prompts:
+                    self.custom_instance_prompts.extend(itertools.repeat(caption, repeats))
+        else:
+            self.instance_data_root = Path(instance_data_root)
+            if not self.instance_data_root.exists():
+                raise ValueError("Instance images root doesn't exists.")
+
+            instance_images = [Image.open(path) for path in list(Path(instance_data_root).iterdir())]
+            self.custom_instance_prompts = None
+
+        self.instance_images = []
+        for img in instance_images:
+            self.instance_images.extend(itertools.repeat(img, repeats))
+        self.num_instance_images = len(self.instance_images)
+        self._length = self.num_instance_images
+
+        if class_data_root is not None:
+            self.class_data_root = Path(class_data_root)
+            self.class_data_root.mkdir(parents=True, exist_ok=True)
+            self.class_images_path = list(self.class_data_root.iterdir())
+            if class_num is not None:
+                self.num_class_images = min(len(self.class_images_path), class_num)
+            else:
+                self.num_class_images = len(self.class_images_path)
+            self._length = max(self.num_class_images, self.num_instance_images)
+        else:
+            self.class_data_root = None
+
+        self.image_transforms = transforms.Compose(
+            [
+                transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
+                transforms.ToTensor(),
+                transforms.Normalize([0.5], [0.5]),
+            ]
+        )
+
+    def __len__(self):
+        return self._length
+
+    def __getitem__(self, index):
+        example = {}
+        instance_image = self.instance_images[index % self.num_instance_images]
+        instance_image = exif_transpose(instance_image)
+
+        if not instance_image.mode == "RGB":
+            instance_image = instance_image.convert("RGB")
+        example["instance_images"] = self.image_transforms(instance_image)
+
+        if self.custom_instance_prompts:
+            caption = self.custom_instance_prompts[index % self.num_instance_images]
+            if caption:
+                example["instance_prompt"] = caption
+            else:
+                example["instance_prompt"] = self.instance_prompt
+
+        else:  # costum prompts were provided, but length does not match size of image dataset
+            example["instance_prompt"] = self.instance_prompt
+
+        if self.class_data_root:
+            class_image = Image.open(self.class_images_path[index % self.num_class_images])
+            class_image = exif_transpose(class_image)
+
+            if not class_image.mode == "RGB":
+                class_image = class_image.convert("RGB")
+            example["class_images"] = self.image_transforms(class_image)
+            example["class_prompt"] = self.class_prompt
+
+        return example
+
+
 def collate_fn(examples, with_prior_preservation=False):
     pixel_values = [example["instance_images"] for example in examples]
     prompts = [example["instance_prompt"] for example in examples]
@@ -224,6 +735,23 @@ def collate_fn(examples, with_prior_preservation=False):
 
     batch = {"pixel_values": pixel_values, "prompts": prompts}
     return batch
+
+
+class PromptDataset(Dataset):
+    "A simple dataset to prepare the prompts to generate class images on multiple GPUs."
+
+    def __init__(self, prompt, num_samples):
+        self.prompt = prompt
+        self.num_samples = num_samples
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, index):
+        example = {}
+        example["prompt"] = self.prompt
+        example["index"] = index
+        return example
 
 
 def tokenize_prompt(tokenizer, prompt):
@@ -267,7 +795,8 @@ def encode_prompt(text_encoders, tokenizers, prompt, text_input_ids_list=None):
     return prompt_embeds, pooled_prompt_embeds
 
 
-def sdxl_sft(args: SDXLDreamBoothArguments):
+def sdxl_dreambooth():
+    args = parse_args()
     logging_dir = Path(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -303,10 +832,6 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
     if args.seed is not None:
         set_seed(args.seed)
 
-    if not os.path.exists(args.model_id_or_path):
-        args.model_id_or_path = snapshot_download(
-            args.model_id_or_path, revision=args.model_revision)
-
     # Generate class images if prior preservation is enabled.
     if args.with_prior_preservation:
         class_images_dir = Path(args.class_data_dir)
@@ -323,9 +848,9 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
             elif args.prior_generation_precision == "bf16":
                 torch_dtype = torch.bfloat16
             pipeline = StableDiffusionXLPipeline.from_pretrained(
-                args.model_id_or_path,
+                args.pretrained_model_name_or_path,
                 torch_dtype=torch_dtype,
-                revision=args.model_revision,
+                revision=args.revision,
                 variant=args.variant,
             )
             pipeline.set_progress_bar_config(disable=True)
@@ -340,7 +865,7 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
             pipeline.to(accelerator.device)
 
             for example in tqdm(
-                sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
+                    sample_dataloader, desc="Generating class images", disable=not accelerator.is_local_main_process
             ):
                 images = pipeline(example["prompt"]).images
 
@@ -365,47 +890,47 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
 
     # Load the tokenizers
     tokenizer_one = AutoTokenizer.from_pretrained(
-        args.model_id_or_path,
+        args.pretrained_model_name_or_path,
         subfolder="tokenizer",
-        revision=args.model_revision,
+        revision=args.revision,
         use_fast=False,
     )
     tokenizer_two = AutoTokenizer.from_pretrained(
-        args.model_id_or_path,
+        args.pretrained_model_name_or_path,
         subfolder="tokenizer_2",
-        revision=args.model_revision,
+        revision=args.revision,
         use_fast=False,
     )
 
     # import correct text encoder classes
     text_encoder_cls_one = import_model_class_from_model_name_or_path(
-        args.model_id_or_path, args.model_revision
+        args.pretrained_model_name_or_path, args.revision
     )
     text_encoder_cls_two = import_model_class_from_model_name_or_path(
-        args.model_id_or_path, args.model_revision, subfolder="text_encoder_2"
+        args.pretrained_model_name_or_path, args.revision, subfolder="text_encoder_2"
     )
 
     # Load scheduler and models
-    noise_scheduler = DDPMScheduler.from_pretrained(args.model_id_or_path, subfolder="scheduler")
+    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     text_encoder_one = text_encoder_cls_one.from_pretrained(
-        args.model_id_or_path, subfolder="text_encoder", revision=args.model_revision, variant=args.variant
+        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
     )
     text_encoder_two = text_encoder_cls_two.from_pretrained(
-        args.model_id_or_path, subfolder="text_encoder_2", revision=args.model_revision, variant=args.variant
+        args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision, variant=args.variant
     )
     vae_path = (
-        args.model_id_or_path
-        if args.vae_model_id_or_path is None
-        else args.vae_model_id_or_path
+        args.pretrained_model_name_or_path
+        if args.pretrained_vae_model_name_or_path is None
+        else args.pretrained_vae_model_name_or_path
     )
     vae = AutoencoderKL.from_pretrained(
         vae_path,
-        subfolder="vae" if args.vae_model_id_or_path is None else None,
-        revision=args.model_revision,
+        subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
+        revision=args.revision,
         variant=args.variant,
     )
     unet = UNet2DConditionModel.from_pretrained(
-        args.model_id_or_path, subfolder="unet", revision=args.model_revision, variant=args.variant
+        args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
     )
 
     # We only train the additional adapter LoRA layers
@@ -451,83 +976,20 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
             text_encoder_one.gradient_checkpointing_enable()
             text_encoder_two.gradient_checkpointing_enable()
 
-    if args.sft_type == 'lora':
-        # now we will add new LoRA weights to the attention layers
-        unet_lora_config = LoRAConfig(
-            r=args.lora_rank, init_lora_weights="gaussian", target_modules=["to_k", "to_q", "to_v", "to_out.0"]
+    # now we will add new LoRA weights to the attention layers
+    unet_lora_config = LoRAConfig(
+        r=args.rank, init_lora_weights="gaussian", target_modules=["to_k", "to_q", "to_v", "to_out.0"]
+    )
+    unet = Swift.prepare_model(unet, unet_lora_config)
+
+    # The text encoder comes from 🤗 transformers, so we cannot directly modify it.
+    # So, instead, we monkey-patch the forward calls of its attention-blocks.
+    if args.train_text_encoder:
+        text_lora_config = LoraConfig(
+            r=args.rank, init_lora_weights="gaussian", target_modules=["q_proj", "k_proj", "v_proj", "out_proj"]
         )
-        unet = Swift.prepare_model(unet, unet_lora_config)
-
-        # The text encoder comes from 🤗 transformers, so we cannot directly modify it.
-        # So, instead, we monkey-patch the forward calls of its attention-blocks.
-        if args.train_text_encoder:
-            text_lora_config = LoRAConfig(
-                r=args.lora_rank, init_lora_weights="gaussian", target_modules=["q_proj", "k_proj", "v_proj", "out_proj"]
-            )
-            text_encoder_one = Swift.prepare_model(text_encoder_one, text_lora_config)
-            text_encoder_two = Swift.prepare_model(text_encoder_two, text_lora_config)
-
-    # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-    def save_model_hook(models, weights, output_dir):
-        if accelerator.is_main_process:
-            # there are only two options here. Either are just the unet attn processor layers
-            # or there are the unet and text encoder atten layers
-            unet_lora_layers_to_save = None
-            text_encoder_one_lora_layers_to_save = None
-            text_encoder_two_lora_layers_to_save = None
-
-            for model in models:
-                if isinstance(model, type(accelerator.unwrap_model(unet))):
-                    unet_lora_layers_to_save = get_peft_model_state_dict(model)
-                elif isinstance(model, type(accelerator.unwrap_model(text_encoder_one))):
-                    text_encoder_one_lora_layers_to_save = get_peft_model_state_dict(model)
-                elif isinstance(model, type(accelerator.unwrap_model(text_encoder_two))):
-                    text_encoder_two_lora_layers_to_save = get_peft_model_state_dict(model)
-                else:
-                    raise ValueError(f"unexpected save model: {model.__class__}")
-
-                # make sure to pop weight so that corresponding model is not saved again
-                weights.pop()
-
-            StableDiffusionXLPipeline.save_lora_weights(
-                output_dir,
-                unet_lora_layers=unet_lora_layers_to_save,
-                text_encoder_lora_layers=text_encoder_one_lora_layers_to_save,
-                text_encoder_2_lora_layers=text_encoder_two_lora_layers_to_save,
-            )
-
-    def load_model_hook(models, input_dir):
-        unet_ = None
-        text_encoder_one_ = None
-        text_encoder_two_ = None
-
-        while len(models) > 0:
-            model = models.pop()
-
-            if isinstance(model, type(accelerator.unwrap_model(unet))):
-                unet_ = model
-            elif isinstance(model, type(accelerator.unwrap_model(text_encoder_one))):
-                text_encoder_one_ = model
-            elif isinstance(model, type(accelerator.unwrap_model(text_encoder_two))):
-                text_encoder_two_ = model
-            else:
-                raise ValueError(f"unexpected save model: {model.__class__}")
-
-        lora_state_dict, network_alphas = LoraLoaderMixin.lora_state_dict(input_dir)
-        LoraLoaderMixin.load_lora_into_unet(lora_state_dict, network_alphas=network_alphas, unet=unet_)
-
-        text_encoder_state_dict = {k: v for k, v in lora_state_dict.items() if "text_encoder." in k}
-        LoraLoaderMixin.load_lora_into_text_encoder(
-            text_encoder_state_dict, network_alphas=network_alphas, text_encoder=text_encoder_one_
-        )
-
-        text_encoder_2_state_dict = {k: v for k, v in lora_state_dict.items() if "text_encoder_2." in k}
-        LoraLoaderMixin.load_lora_into_text_encoder(
-            text_encoder_2_state_dict, network_alphas=network_alphas, text_encoder=text_encoder_two_
-        )
-
-    accelerator.register_save_state_pre_hook(save_model_hook)
-    accelerator.register_load_state_pre_hook(load_model_hook)
+        text_encoder_one = Swift.prepare_model(text_encoder_one, text_lora_config)
+        text_encoder_two = Swift.prepare_model(text_encoder_two, text_lora_config)
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -536,7 +998,7 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
 
     if args.scale_lr:
         args.learning_rate = (
-            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+                args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
         )
 
     unet_lora_parameters = list(filter(lambda p: p.requires_grad, unet.parameters()))
@@ -622,6 +1084,7 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
 
     # Dataset and DataLoaders creation:
     train_dataset = DreamBoothDataset(
+        args=args,
         instance_data_root=args.instance_data_dir,
         instance_prompt=args.instance_prompt,
         class_prompt=args.class_prompt,
@@ -832,7 +1295,7 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
                 # Convert images to latent space
                 model_input = vae.encode(pixel_values).latent_dist.sample()
                 model_input = model_input * vae.config.scaling_factor
-                if args.vae_model_id_or_path is None:
+                if args.pretrained_vae_model_name_or_path is None:
                     model_input = model_input.to(weight_dtype)
 
                 # Sample noise that we'll add to the latents
@@ -909,7 +1372,7 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
                     # This is discussed in Section 4.2 of the same paper.
                     snr = compute_snr(noise_scheduler, timesteps)
                     base_weight = (
-                        torch.stack([snr, args.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0] / snr
+                            torch.stack([snr, args.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0] / snr
                     )
 
                     if noise_scheduler.config.prediction_type == "v_prediction":
@@ -978,7 +1441,7 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
                 break
 
         if accelerator.is_main_process:
-            if args.validation_prompt is not None and (epoch+1) % args.validation_epochs == 0:
+            if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
                 logger.info(
                     f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
                     f" {args.validation_prompt}."
@@ -986,24 +1449,24 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
                 # create pipeline
                 if not args.train_text_encoder:
                     text_encoder_one = text_encoder_cls_one.from_pretrained(
-                        args.model_id_or_path,
+                        args.pretrained_model_name_or_path,
                         subfolder="text_encoder",
-                        revision=args.model_revision,
+                        revision=args.revision,
                         variant=args.variant,
                     )
                     text_encoder_two = text_encoder_cls_two.from_pretrained(
-                        args.model_id_or_path,
+                        args.pretrained_model_name_or_path,
                         subfolder="text_encoder_2",
-                        revision=args.model_revision,
+                        revision=args.revision,
                         variant=args.variant,
                     )
                 pipeline = StableDiffusionXLPipeline.from_pretrained(
-                    args.model_id_or_path,
+                    args.pretrained_model_name_or_path,
                     vae=vae,
                     text_encoder=accelerator.unwrap_model(text_encoder_one),
                     text_encoder_2=accelerator.unwrap_model(text_encoder_two),
-                    unet=accelerator.unwrap_model(unet.base_model),
-                    revision=args.model_revision,
+                    unet=accelerator.unwrap_model(unet),
+                    revision=args.revision,
                     variant=args.variant,
                     torch_dtype=weight_dtype,
                 )
@@ -1062,35 +1525,23 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
 
         if args.train_text_encoder:
             text_encoder_one = accelerator.unwrap_model(text_encoder_one)
-            # text_encoder_lora_layers = text_encoder_one.state_dict() # get_peft_model_state_dict(text_encoder_one.to(torch.float32))
             text_encoder_one.save_pretrained(os.path.join(args.output_dir, 'text_encoder1'))
             text_encoder_two = accelerator.unwrap_model(text_encoder_two)
-            # text_encoder_2_lora_layers = text_encoder_two.state_dict() # get_peft_model_state_dict(text_encoder_two.to(torch.float32))
-            text_encoder_2_lora_layers.save_pretrained(os.path.join(args.output_dir, 'text_encoder2'))
-        else:
-            text_encoder_lora_layers = None
-            text_encoder_2_lora_layers = None
-
-        # StableDiffusionXLPipeline.save_lora_weights(
-        #     save_directory=args.output_dir,
-        #     unet_lora_layers=unet_lora_layers,
-        #     text_encoder_lora_layers=text_encoder_lora_layers,
-        #     text_encoder_2_lora_layers=text_encoder_2_lora_layers,
-        # )
+            text_encoder_two.save_pretrained(os.path.join(args.output_dir, 'text_encoder2'))
 
         # Final inference
         # Load previous pipeline
         vae = AutoencoderKL.from_pretrained(
             vae_path,
-            subfolder="vae" if args.vae_model_id_or_path is None else None,
-            revision=args.model_revision,
+            subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
+            revision=args.revision,
             variant=args.variant,
             torch_dtype=weight_dtype,
         )
         pipeline = StableDiffusionXLPipeline.from_pretrained(
-            args.model_id_or_path,
+            args.pretrained_model_name_or_path,
             vae=vae,
-            revision=args.model_revision,
+            revision=args.revision,
             variant=args.variant,
             torch_dtype=weight_dtype,
         )
@@ -1111,9 +1562,10 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
         # load attention processors
         pipeline.unet = Swift.from_pretrained(pipeline.unet, os.path.join(args.output_dir, 'unet'))
         if args.train_text_encoder:
-            pipeline.text_encoder_one = Swift.from_pretrained(pipeline.text_encoder_one, os.path.join(args.output_dir, 'text_encoder1'))
-            pipeline.text_encoder_two = Swift.from_pretrained(pipeline.text_encoder_two, os.path.join(args.output_dir, 'text_encoder2'))
-        # pipeline.load_lora_weights(args.output_dir)
+            pipeline.text_encoder_one = Swift.from_pretrained(pipeline.text_encoder_one,
+                                                              os.path.join(args.output_dir, 'text_encoder1'))
+            pipeline.text_encoder_two = Swift.from_pretrained(pipeline.text_encoder_two,
+                                                              os.path.join(args.output_dir, 'text_encoder2'))
 
         # run inference
         images = []
@@ -1124,8 +1576,6 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
                 pipeline(args.validation_prompt, num_inference_steps=25, generator=generator).images[0]
                 for _ in range(args.num_validation_images)
             ]
-            for idx, image in enumerate(images):
-                image.save(f'./{idx}.jpg')
 
             for tracker in accelerator.trackers:
                 if tracker.name == "tensorboard":
@@ -1145,12 +1595,12 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
             save_model_card(
                 repo_id,
                 images=images,
-                base_model=args.model_id_or_path,
+                base_model=args.pretrained_model_name_or_path,
                 train_text_encoder=args.train_text_encoder,
                 instance_prompt=args.instance_prompt,
                 validation_prompt=args.validation_prompt,
                 repo_folder=args.output_dir,
-                vae_path=args.vae_model_id_or_path,
+                vae_path=args.pretrained_vae_model_name_or_path,
             )
             upload_folder(
                 repo_id=repo_id,
@@ -1160,8 +1610,3 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
             )
 
     accelerator.end_training()
-
-
-if __name__ == "__main__":
-    args = parse_args()
-    main(args)
