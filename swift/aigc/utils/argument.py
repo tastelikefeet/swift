@@ -31,10 +31,6 @@ class AnimateDiffArguments:
 
     seed: int = 42
 
-    lora_rank: int = 8
-    lora_alpha: int = 32
-    lora_dropout_p: float = 0.05
-
     gradient_checkpointing: bool = False
     batch_size: int = 1
     num_train_epochs: int = 1
@@ -173,3 +169,120 @@ class AnimateDiffInferArguments:
 
     def __post_init__(self) -> None:
         pass
+
+
+class DreamBoothArguments:
+    instance_data_dir: str = None
+    image_column: str = None
+    class_data_dir: str = None
+    instance_prompt: str = None
+    class_prompt: str = None
+    with_prior_preservation: bool = None
+    num_class_images: int = None
+
+
+class SDXLArguments:
+    resolution: int = 1024
+    crops_coords_top_left_h: int = 0
+    crops_coords_top_left_w: int = 0
+    center_crop: bool = False
+
+
+class LoRAArguments:
+    lora_rank: int = 8
+    lora_alpha: int = 32
+    lora_dropout_p: float = 0.05
+
+
+class HubArguments:
+    push_to_hub: bool = False
+    # 'user_name/repo_name' or 'repo_name'
+    hub_model_id: Optional[str] = None
+    hub_private_repo: bool = True
+    push_hub_strategy: str = field(
+        default='push_best',
+        metadata={'choices': ['push_last', 'all_checkpoints']})
+    # None: use env var `MODELSCOPE_API_TOKEN`
+    hub_token: Optional[str] = field(
+        default=None,
+        metadata={
+            'help':
+                'SDK token can be found in https://modelscope.cn/my/myaccesstoken'
+        })
+
+
+class SDXLDreamBoothArguments(SDXLArguments, DreamBoothArguments, LoRAArguments):
+    model_id_or_path: str = None
+    model_revision: str = None
+    variant: str = None
+    dataset_name: str = None
+    dataset_config_name: str = None
+    validation_prompt: str = None
+    num_validation_images: int = None
+    validation_epochs: int = None
+    output_dir: str = None
+    train_text_encoder: bool = False
+    train_batch_size: int = 4
+    sample_batch_size: int = 4
+    num_train_epochs: int = 1
+    checkpointing_steps: int = 500
+    checkpoints_total_limit: int = None
+    resume_from_checkpoint: str = None
+    gradient_accumulation_steps: int = 1
+    gradient_checkpointing: bool = True
+    learning_rate: float = 1e-4
+    text_encoder_lr: float = 5e-6
+    scale_lr: bool = False
+    lr_scheduler: str = 'constant'
+    snr_gamma: float = None
+    lr_warmup_steps: int = 500
+    lr_num_cycles: int = 1
+    dataloader_num_workers: int = 1
+    optimizer: str = 'AdamW'
+    use_8bit_adam: bool = False
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.999
+    prodigy_beta3: float = None
+    adam_weight_decay: float = 1e-4
+    adam_weight_decay_text_encoder: float = 1e-3
+    adam_epsilon: float = 1e-8
+    prodigy_use_bias_correction: bool = True
+    prodigy_safeguard_warmup: bool = True
+    max_grad_norm: float = 1.0
+    logging_dir: str = 'logs'
+    allow_tf32: bool = True
+    report_to: str = 'tensorboard'
+    mixed_precision: str = field(
+        default='None',
+        metadata={
+            'choices': ["no", "fp16", "bf16"],
+        }
+    )
+    prior_generation_precision: str = field(
+        default='None',
+        metadata={
+            'choices': ["no", "fp32", "fp16", "bf16"],
+        }
+    )
+    enable_xformers_memory_efficient_attention: bool = True
+    sft_type: str = field(
+        default='lora', metadata={'choices': ['lora', 'full']})
+
+    def __post_init__(self) -> None:
+        if self.dataset_name is None and self.instance_data_dir is None:
+            raise ValueError("Specify either `--dataset_name` or `--instance_data_dir`")
+
+        if self.dataset_name is not None and self.instance_data_dir is not None:
+            raise ValueError("Specify only one of `--dataset_name` or `--instance_data_dir`")
+
+        if self.with_prior_preservation:
+            if self.class_data_dir is None:
+                raise ValueError("You must specify a data directory for class images.")
+            if self.class_prompt is None:
+                raise ValueError("You must specify prompt for class images.")
+        else:
+            # logger is not available yet
+            if self.class_data_dir is not None:
+                warnings.warn("You need not use --class_data_dir without --with_prior_preservation.")
+            if self.class_prompt is not None:
+                warnings.warn("You need not use --class_prompt without --with_prior_preservation.")
