@@ -28,13 +28,16 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
+from swift.aigc.utils import SDXLDreamBoothArguments
 from accelerate import Accelerator
+from swift.aigc.utils.datasets import PromptDataset, DreamBoothDataset
+from modelscope import snapshot_download
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
 from huggingface_hub import create_repo, upload_folder
 from huggingface_hub.utils import insecure_hashlib
 from packaging import version
-from swift import LoRAConfig
+from swift import LoRAConfig, Swift
 from PIL import Image
 from PIL.ImageOps import exif_transpose
 from torch.utils.data import Dataset
@@ -56,9 +59,6 @@ from diffusers.training_utils import compute_snr
 from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 
-
-# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.25.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -163,10 +163,10 @@ Weights for this model are available in Safetensors format.
 
 
 def import_model_class_from_model_name_or_path(
-    pretrained_model_name_or_path: str, revision: str, subfolder: str = "text_encoder"
+    model_id_or_path: str, revision: str, subfolder: str = "text_encoder"
 ):
     text_encoder_config = PretrainedConfig.from_pretrained(
-        pretrained_model_name_or_path, subfolder=subfolder, revision=revision
+        model_id_or_path, subfolder=subfolder, revision=revision
     )
     model_class = text_encoder_config.architectures[0]
 
@@ -303,6 +303,10 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
     if args.seed is not None:
         set_seed(args.seed)
 
+    if not os.path.exists(args.model_id_or_path):
+        args.model_id_or_path = snapshot_download(
+            args.model_id_or_path, revision=args.model_revision)
+
     # Generate class images if prior preservation is enabled.
     if args.with_prior_preservation:
         class_images_dir = Path(args.class_data_dir)
@@ -319,9 +323,9 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
             elif args.prior_generation_precision == "bf16":
                 torch_dtype = torch.bfloat16
             pipeline = StableDiffusionXLPipeline.from_pretrained(
-                args.pretrained_model_name_or_path,
+                args.model_id_or_path,
                 torch_dtype=torch_dtype,
-                revision=args.revision,
+                revision=args.model_revision,
                 variant=args.variant,
             )
             pipeline.set_progress_bar_config(disable=True)
@@ -361,47 +365,47 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
 
     # Load the tokenizers
     tokenizer_one = AutoTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
+        args.model_id_or_path,
         subfolder="tokenizer",
-        revision=args.revision,
+        revision=args.model_revision,
         use_fast=False,
     )
     tokenizer_two = AutoTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
+        args.model_id_or_path,
         subfolder="tokenizer_2",
-        revision=args.revision,
+        revision=args.model_revision,
         use_fast=False,
     )
 
     # import correct text encoder classes
     text_encoder_cls_one = import_model_class_from_model_name_or_path(
-        args.pretrained_model_name_or_path, args.revision
+        args.model_id_or_path, args.model_revision
     )
     text_encoder_cls_two = import_model_class_from_model_name_or_path(
-        args.pretrained_model_name_or_path, args.revision, subfolder="text_encoder_2"
+        args.model_id_or_path, args.model_revision, subfolder="text_encoder_2"
     )
 
     # Load scheduler and models
-    noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
+    noise_scheduler = DDPMScheduler.from_pretrained(args.model_id_or_path, subfolder="scheduler")
     text_encoder_one = text_encoder_cls_one.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+        args.model_id_or_path, subfolder="text_encoder", revision=args.model_revision, variant=args.variant
     )
     text_encoder_two = text_encoder_cls_two.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision, variant=args.variant
+        args.model_id_or_path, subfolder="text_encoder_2", revision=args.model_revision, variant=args.variant
     )
     vae_path = (
-        args.pretrained_model_name_or_path
-        if args.pretrained_vae_model_name_or_path is None
-        else args.pretrained_vae_model_name_or_path
+        args.model_id_or_path
+        if args.vae_model_id_or_path is None
+        else args.vae_model_id_or_path
     )
     vae = AutoencoderKL.from_pretrained(
         vae_path,
-        subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
-        revision=args.revision,
+        subfolder="vae" if args.vae_model_id_or_path is None else None,
+        revision=args.model_revision,
         variant=args.variant,
     )
     unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
+        args.model_id_or_path, subfolder="unet", revision=args.model_revision, variant=args.variant
     )
 
     # We only train the additional adapter LoRA layers
@@ -450,7 +454,7 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
     if args.sft_type == 'lora':
         # now we will add new LoRA weights to the attention layers
         unet_lora_config = LoRAConfig(
-            r=args.rank, init_lora_weights="gaussian", target_modules=["to_k", "to_q", "to_v", "to_out.0"]
+            r=args.lora_rank, init_lora_weights="gaussian", target_modules=["to_k", "to_q", "to_v", "to_out.0"]
         )
         unet = Swift.prepare_model(unet, unet_lora_config)
 
@@ -458,7 +462,7 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
         # So, instead, we monkey-patch the forward calls of its attention-blocks.
         if args.train_text_encoder:
             text_lora_config = LoRAConfig(
-                r=args.rank, init_lora_weights="gaussian", target_modules=["q_proj", "k_proj", "v_proj", "out_proj"]
+                r=args.lora_rank, init_lora_weights="gaussian", target_modules=["q_proj", "k_proj", "v_proj", "out_proj"]
             )
             text_encoder_one = Swift.prepare_model(text_encoder_one, text_lora_config)
             text_encoder_two = Swift.prepare_model(text_encoder_two, text_lora_config)
@@ -828,7 +832,7 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
                 # Convert images to latent space
                 model_input = vae.encode(pixel_values).latent_dist.sample()
                 model_input = model_input * vae.config.scaling_factor
-                if args.pretrained_vae_model_name_or_path is None:
+                if args.vae_model_id_or_path is None:
                     model_input = model_input.to(weight_dtype)
 
                 # Sample noise that we'll add to the latents
@@ -982,24 +986,24 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
                 # create pipeline
                 if not args.train_text_encoder:
                     text_encoder_one = text_encoder_cls_one.from_pretrained(
-                        args.pretrained_model_name_or_path,
+                        args.model_id_or_path,
                         subfolder="text_encoder",
-                        revision=args.revision,
+                        revision=args.model_revision,
                         variant=args.variant,
                     )
                     text_encoder_two = text_encoder_cls_two.from_pretrained(
-                        args.pretrained_model_name_or_path,
+                        args.model_id_or_path,
                         subfolder="text_encoder_2",
-                        revision=args.revision,
+                        revision=args.model_revision,
                         variant=args.variant,
                     )
                 pipeline = StableDiffusionXLPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
+                    args.model_id_or_path,
                     vae=vae,
                     text_encoder=accelerator.unwrap_model(text_encoder_one),
                     text_encoder_2=accelerator.unwrap_model(text_encoder_two),
                     unet=accelerator.unwrap_model(unet),
-                    revision=args.revision,
+                    revision=args.model_revision,
                     variant=args.variant,
                     torch_dtype=weight_dtype,
                 )
@@ -1076,15 +1080,15 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
         # Load previous pipeline
         vae = AutoencoderKL.from_pretrained(
             vae_path,
-            subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
-            revision=args.revision,
+            subfolder="vae" if args.vae_model_id_or_path is None else None,
+            revision=args.model_revision,
             variant=args.variant,
             torch_dtype=weight_dtype,
         )
         pipeline = StableDiffusionXLPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
+            args.model_id_or_path,
             vae=vae,
-            revision=args.revision,
+            revision=args.model_revision,
             variant=args.variant,
             torch_dtype=weight_dtype,
         )
@@ -1133,12 +1137,12 @@ def sdxl_sft(args: SDXLDreamBoothArguments):
             save_model_card(
                 repo_id,
                 images=images,
-                base_model=args.pretrained_model_name_or_path,
+                base_model=args.model_id_or_path,
                 train_text_encoder=args.train_text_encoder,
                 instance_prompt=args.instance_prompt,
                 validation_prompt=args.validation_prompt,
                 repo_folder=args.output_dir,
-                vae_path=args.pretrained_vae_model_name_or_path,
+                vae_path=args.vae_model_id_or_path,
             )
             upload_folder(
                 repo_id=repo_id,

@@ -1,1 +1,1 @@
-from .argument import AnimateDiffArguments, AnimateDiffInferArguments
+from .argument import AnimateDiffArguments, AnimateDiffInferArguments, SDXLDreamBoothArguments

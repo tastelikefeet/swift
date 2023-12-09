@@ -171,6 +171,7 @@ class AnimateDiffInferArguments:
         pass
 
 
+@dataclass
 class DreamBoothArguments:
     instance_data_dir: str = None
     image_column: str = None
@@ -179,8 +180,10 @@ class DreamBoothArguments:
     class_prompt: str = None
     with_prior_preservation: bool = None
     num_class_images: int = None
+    repeats: int = 1
 
 
+@dataclass
 class SDXLArguments:
     resolution: int = 1024
     crops_coords_top_left_h: int = 0
@@ -188,12 +191,14 @@ class SDXLArguments:
     center_crop: bool = False
 
 
+@dataclass
 class LoRAArguments:
     lora_rank: int = 8
     lora_alpha: int = 32
     lora_dropout_p: float = 0.05
 
 
+@dataclass
 class HubArguments:
     push_to_hub: bool = False
     # 'user_name/repo_name' or 'repo_name'
@@ -211,9 +216,13 @@ class HubArguments:
         })
 
 
-class SDXLDreamBoothArguments(SDXLArguments, DreamBoothArguments, LoRAArguments):
+@dataclass
+class SDXLDreamBoothArguments(SDXLArguments, DreamBoothArguments, LoRAArguments, HubArguments):
     model_id_or_path: str = None
     model_revision: str = None
+    vae_model_id_or_path: str = None
+    vae_revision: str = None
+    seed: int = None
     variant: str = None
     dataset_name: str = None
     dataset_config_name: str = None
