@@ -26,7 +26,8 @@ from transformers import CLIPTextModel, CLIPTokenizer
 
 from swift import LoRAConfig, Swift, get_logger, push_to_hub
 from swift.aigc.utils import AnimateDiffArguments
-from swift.aigc.utils.utils import generate_dreambooth_images
+from swift.aigc.utils.datasets import AnimateDiffDataset
+from swift.aigc.utils.utils import save_videos_grid
 from swift.utils import get_dist_setting, is_dist
 
 logger = get_logger()
