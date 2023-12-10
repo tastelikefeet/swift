@@ -23,26 +23,17 @@ import shutil
 import warnings
 from pathlib import Path
 
+import diffusers
 import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
+from PIL import Image
+from PIL.ImageOps import exif_transpose
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
-from huggingface_hub import create_repo, upload_folder
-from huggingface_hub.utils import insecure_hashlib
-from packaging import version
-from swift import LoRAConfig, Swift
-from PIL import Image
-from PIL.ImageOps import exif_transpose
-from torch.utils.data import Dataset
-from torchvision import transforms
-from tqdm.auto import tqdm
-from transformers import AutoTokenizer, PretrainedConfig
-
-import diffusers
 from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
@@ -50,11 +41,19 @@ from diffusers import (
     StableDiffusionXLPipeline,
     UNet2DConditionModel,
 )
-from diffusers.loaders import LoraLoaderMixin
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import compute_snr
 from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
+from huggingface_hub.utils import insecure_hashlib
+from modelscope import AutoTokenizer
+from packaging import version
+from torch.utils.data import Dataset
+from torchvision import transforms
+from tqdm.auto import tqdm
+from transformers import PretrainedConfig
+
+from swift import LoRAConfig, Swift, snapshot_download, push_to_hub
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.25.0.dev0")
@@ -572,6 +571,16 @@ def parse_args(input_args=None):
         if args.class_prompt is not None:
             warnings.warn("You need not use --class_prompt without --with_prior_preservation.")
 
+    args.base_model_id = args.pretrained_model_name_or_path
+    if not os.path.exists(args.pretrained_model_name_or_path):
+        args.pretrained_model_name_or_path = snapshot_download(
+            args.pretrained_model_name_or_path, revision=args.revision)
+
+    args.vae_base_model_id = args.pretrained_vae_model_name_or_path
+    if args.pretrained_vae_model_name_or_path and not os.path.exists(args.pretrained_vae_model_name_or_path):
+        args.pretrained_vae_model_name_or_path = snapshot_download(
+            args.pretrained_vae_model_name_or_path)
+
     return args
 
 
@@ -795,7 +804,7 @@ def encode_prompt(text_encoders, tokenizers, prompt, text_input_ids_list=None):
     return prompt_embeds, pooled_prompt_embeds
 
 
-def sdxl_dreambooth():
+def main():
     args = parse_args()
     logging_dir = Path(args.output_dir, args.logging_dir)
 
@@ -882,11 +891,6 @@ def sdxl_dreambooth():
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
-
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
-            ).repo_id
 
     # Load the tokenizers
     tokenizer_one = AutoTokenizer.from_pretrained(
@@ -985,7 +989,7 @@ def sdxl_dreambooth():
     # The text encoder comes from 🤗 transformers, so we cannot directly modify it.
     # So, instead, we monkey-patch the forward calls of its attention-blocks.
     if args.train_text_encoder:
-        text_lora_config = LoraConfig(
+        text_lora_config = LoRAConfig(
             r=args.rank, init_lora_weights="gaussian", target_modules=["q_proj", "k_proj", "v_proj", "out_proj"]
         )
         text_encoder_one = Swift.prepare_model(text_encoder_one, text_lora_config)
@@ -1593,20 +1597,15 @@ def sdxl_dreambooth():
 
         if args.push_to_hub:
             save_model_card(
-                repo_id,
+                args.hub_model_id,
                 images=images,
-                base_model=args.pretrained_model_name_or_path,
+                base_model=args.base_model_id,
                 train_text_encoder=args.train_text_encoder,
                 instance_prompt=args.instance_prompt,
                 validation_prompt=args.validation_prompt,
                 repo_folder=args.output_dir,
-                vae_path=args.pretrained_vae_model_name_or_path,
+                vae_path=args.vae_base_model_id,
             )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+            push_to_hub(args.hub_model_id, args.output_dir, args.hub_token)
 
     accelerator.end_training()

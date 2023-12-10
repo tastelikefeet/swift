@@ -34,7 +34,8 @@ from datasets import load_dataset
 from packaging import version
 from PIL import Image
 from torchvision import transforms
-from modelscope import snapshot_download
+from swift import push_to_hub
+from swift import snapshot_download
 from tqdm.auto import tqdm
 from modelscope import AutoTokenizer
 from transformers import PretrainedConfig
@@ -578,6 +579,15 @@ def parse_args(input_args=None):
             "`--resolution` must be divisible by 8 for consistently sized encoded images between the VAE and the controlnet encoder."
         )
 
+    args.base_model_id = args.pretrained_model_name_or_path
+    if not os.path.exists(args.pretrained_model_name_or_path):
+        args.pretrained_model_name_or_path = snapshot_download(
+            args.pretrained_model_name_or_path, revision=args.revision)
+
+    if args.controlnet_model_name_or_path and not os.path.exists(args.controlnet_model_name_or_path):
+        args.controlnet_model_name_or_path = snapshot_download(
+            args.controlnet_model_name_or_path)
+
     return args
 
 
@@ -712,7 +722,7 @@ def collate_fn(examples):
     }
 
 
-def controlnet_sft():
+def main():
     args = parse_args()
     logging_dir = Path(args.output_dir, args.logging_dir)
 
@@ -738,13 +748,6 @@ def controlnet_sft():
     else:
         transformers.utils.logging.set_verbosity_error()
         diffusers.utils.logging.set_verbosity_error()
-
-    if not os.path.exists(args.pretrained_model_name_or_path):
-        args.pretrained_model_name_or_path = snapshot_download(
-            args.pretrained_model_name_or_path, revision=args.revision)
-    if args.controlnet_model_name_or_path and not os.path.exists(args.controlnet_model_name_or_path):
-        args.controlnet_model_name_or_path = snapshot_download(
-            args.controlnet_model_name_or_path)
 
     # If passed along, set the training seed now.
     if args.seed is not None:
@@ -1112,5 +1115,13 @@ def controlnet_sft():
     if accelerator.is_main_process:
         controlnet = accelerator.unwrap_model(controlnet)
         controlnet.save_pretrained(args.output_dir)
+        if args.push_to_hub:
+            save_model_card(
+                args.hub_model_id,
+                image_logs=image_logs,
+                base_model=args.base_model_id,
+                repo_folder=args.output_dir,
+            )
+            push_to_hub(args.hub_model_id, args.output_dir, args.hub_token)
 
     accelerator.end_training()

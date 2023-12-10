@@ -39,12 +39,12 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from braceexpand import braceexpand
-from huggingface_hub import create_repo
 from packaging import version
 from torch.utils.data import default_collate
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, PretrainedConfig
+from transformers import PretrainedConfig
+from modelscope import AutoTokenizer
 from webdataset.tariterators import (
     base_plus_ext,
     tar_file_expander,
@@ -61,9 +61,10 @@ from diffusers import (
     UNet2DConditionModel,
 )
 from diffusers.optimization import get_scheduler
-from diffusers.utils import check_min_version, is_wandb_available
+from diffusers.utils import is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 
+from swift import snapshot_download
 
 MAX_SEQ_LENGTH = 77
 
@@ -75,8 +76,6 @@ MIN_SIZE = 700  # ~960 for LAION, ideal: 1024 if the dataset contains large imag
 if is_wandb_available():
     import wandb
 
-# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.25.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -770,6 +769,15 @@ def parse_args():
     if args.proportion_empty_prompts < 0 or args.proportion_empty_prompts > 1:
         raise ValueError("`--proportion_empty_prompts` must be in the range [0, 1].")
 
+    args.base_model_id = args.pretrained_teacher_model
+    if not os.path.exists(args.pretrained_teacher_model):
+        args.pretrained_teacher_model = snapshot_download(
+            args.pretrained_teacher_model, revision=args.teacher_revision)
+
+    args.vae_base_model_id = args.pretrained_vae_model_name_or_path
+    if args.pretrained_vae_model_name_or_path and not os.path.exists(args.pretrained_vae_model_name_or_path):
+        args.pretrained_vae_model_name_or_path = snapshot_download(
+            args.pretrained_vae_model_name_or_path)
     return args
 
 
@@ -849,14 +857,6 @@ def main(args):
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
-
-        if args.push_to_hub:
-            create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name,
-                exist_ok=True,
-                token=args.hub_token,
-                private=True,
-            ).repo_id
 
     # 1. Create the noise scheduler and the desired noise schedule.
     noise_scheduler = DDPMScheduler.from_pretrained(
@@ -1407,8 +1407,3 @@ def main(args):
         target_unet.save_pretrained(os.path.join(args.output_dir, "unet_target"))
 
     accelerator.end_training()
-
-
-if __name__ == "__main__":
-    args = parse_args()
-    main(args)

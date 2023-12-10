@@ -36,12 +36,12 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
-from huggingface_hub import create_repo, upload_folder
 from packaging import version
 from torchvision import transforms
 from torchvision.transforms.functional import crop
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, PretrainedConfig
+from transformers import PretrainedConfig
+from modelscope import AutoTokenizer
 
 import diffusers
 from diffusers import (
@@ -52,12 +52,10 @@ from diffusers import (
 )
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel, compute_snr
-from diffusers.utils import check_min_version, is_wandb_available
+from diffusers.utils import is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 
-
-# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.25.0.dev0")
+from swift import snapshot_download, push_to_hub
 
 logger = get_logger(__name__)
 
@@ -477,6 +475,15 @@ def parse_args(input_args=None):
     if args.proportion_empty_prompts < 0 or args.proportion_empty_prompts > 1:
         raise ValueError("`--proportion_empty_prompts` must be in the range [0, 1].")
 
+    args.base_model_id = args.pretrained_model_name_or_path
+    if not os.path.exists(args.pretrained_model_name_or_path):
+        args.pretrained_model_name_or_path = snapshot_download(
+            args.pretrained_model_name_or_path, revision=args.revision)
+
+    args.vae_base_model_id = args.pretrained_vae_model_name_or_path
+    if args.pretrained_vae_model_name_or_path and not os.path.exists(args.pretrained_vae_model_name_or_path):
+        args.pretrained_vae_model_name_or_path = snapshot_download(
+            args.pretrained_vae_model_name_or_path)
     return args
 
 
@@ -575,7 +582,8 @@ def generate_timestep_weights(args, num_timesteps):
     return weights
 
 
-def main(args):
+def main():
+    args = parse_args()
     logging_dir = Path(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -616,11 +624,6 @@ def main(args):
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
-
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
-            ).repo_id
 
     # Load the tokenizers
     tokenizer_one = AutoTokenizer.from_pretrained(
@@ -1258,24 +1261,18 @@ def main(args):
 
         if args.push_to_hub:
             save_model_card(
-                repo_id=repo_id,
+                repo_id=args.hub_model_id,
                 images=images,
                 validation_prompt=args.validation_prompt,
-                base_model=args.pretrained_model_name_or_path,
+                base_model=args.base_model_id,
                 dataset_name=args.dataset_name,
                 repo_folder=args.output_dir,
-                vae_path=args.pretrained_vae_model_name_or_path,
+                vae_path=args.vae_base_model_id,
             )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
+            push_to_hub(
+                args.hub_model_id,
+                args.output_dir,
+                args.hub_token,
             )
 
     accelerator.end_training()
-
-
-if __name__ == "__main__":
-    args = parse_args()
-    main(args)

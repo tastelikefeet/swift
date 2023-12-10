@@ -31,17 +31,16 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
-from huggingface_hub import create_repo, upload_folder
 from huggingface_hub.utils import insecure_hashlib
 from packaging import version
-from peft import LoraConfig
-from peft.utils import get_peft_model_state_dict
+from swift import Swift, LoRAConfig, snapshot_download, push_to_hub
 from PIL import Image
 from PIL.ImageOps import exif_transpose
 from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, PretrainedConfig
+from modelscope import AutoTokenizer
+from transformers import PretrainedConfig
 
 import diffusers
 from diffusers import (
@@ -500,6 +499,10 @@ def parse_args(input_args=None):
     if args.train_text_encoder and args.pre_compute_text_embeddings:
         raise ValueError("`--train_text_encoder` cannot be used with `--pre_compute_text_embeddings`")
 
+    args.base_model_id = args.pretrained_model_name_or_path
+    if not os.path.exists(args.pretrained_model_name_or_path):
+        args.pretrained_model_name_or_path = snapshot_download(
+            args.pretrained_model_name_or_path, revision=args.revision)
     return args
 
 
@@ -686,7 +689,8 @@ def encode_prompt(text_encoder, input_ids, attention_mask, text_encoder_use_atte
     return prompt_embeds
 
 
-def main(args):
+def main():
+    args = parse_args()
     logging_dir = Path(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -782,11 +786,6 @@ def main(args):
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
-            ).repo_id
-
     # Load the tokenizer
     if args.tokenizer_name:
         tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name, revision=args.revision, use_fast=False)
@@ -858,67 +857,19 @@ def main(args):
             text_encoder.gradient_checkpointing_enable()
 
     # now we will add new LoRA weights to the attention layers
-    unet_lora_config = LoraConfig(
+    unet_lora_config = LoRAConfig(
         r=args.rank,
         init_lora_weights="gaussian",
         target_modules=["to_k", "to_q", "to_v", "to_out.0", "add_k_proj", "add_v_proj"],
     )
-    unet.add_adapter(unet_lora_config)
+    unet = Swift.prepare_model(unet, unet_lora_config)
 
     # The text encoder comes from 🤗 transformers, we will also attach adapters to it.
     if args.train_text_encoder:
-        text_lora_config = LoraConfig(
+        text_lora_config = LoRAConfig(
             r=args.rank, init_lora_weights="gaussian", target_modules=["q_proj", "k_proj", "v_proj", "out_proj"]
         )
-        text_encoder.add_adapter(text_lora_config)
-
-    # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-    def save_model_hook(models, weights, output_dir):
-        if accelerator.is_main_process:
-            # there are only two options here. Either are just the unet attn processor layers
-            # or there are the unet and text encoder atten layers
-            unet_lora_layers_to_save = None
-            text_encoder_lora_layers_to_save = None
-
-            for model in models:
-                if isinstance(model, type(accelerator.unwrap_model(unet))):
-                    unet_lora_layers_to_save = get_peft_model_state_dict(model)
-                elif isinstance(model, type(accelerator.unwrap_model(text_encoder))):
-                    text_encoder_lora_layers_to_save = get_peft_model_state_dict(model)
-                else:
-                    raise ValueError(f"unexpected save model: {model.__class__}")
-
-                # make sure to pop weight so that corresponding model is not saved again
-                weights.pop()
-
-            LoraLoaderMixin.save_lora_weights(
-                output_dir,
-                unet_lora_layers=unet_lora_layers_to_save,
-                text_encoder_lora_layers=text_encoder_lora_layers_to_save,
-            )
-
-    def load_model_hook(models, input_dir):
-        unet_ = None
-        text_encoder_ = None
-
-        while len(models) > 0:
-            model = models.pop()
-
-            if isinstance(model, type(accelerator.unwrap_model(unet))):
-                unet_ = model
-            elif isinstance(model, type(accelerator.unwrap_model(text_encoder))):
-                text_encoder_ = model
-            else:
-                raise ValueError(f"unexpected save model: {model.__class__}")
-
-        lora_state_dict, network_alphas = LoraLoaderMixin.lora_state_dict(input_dir)
-        LoraLoaderMixin.load_lora_into_unet(lora_state_dict, network_alphas=network_alphas, unet=unet_)
-        LoraLoaderMixin.load_lora_into_text_encoder(
-            lora_state_dict, network_alphas=network_alphas, text_encoder=text_encoder_
-        )
-
-    accelerator.register_save_state_pre_hook(save_model_hook)
-    accelerator.register_load_state_pre_hook(load_model_hook)
+        text_encoder = Swift.prepare_model(text_encoder, text_lora_config)
 
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
@@ -1313,20 +1264,11 @@ def main(args):
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
         unet = unet.to(torch.float32)
-
-        unet_lora_state_dict = get_peft_model_state_dict(unet)
+        unet.save_pretrained(os.path.join(args.output_dir, 'unet'))
 
         if args.train_text_encoder:
             text_encoder = accelerator.unwrap_model(text_encoder)
-            text_encoder_state_dict = get_peft_model_state_dict(text_encoder)
-        else:
-            text_encoder_state_dict = None
-
-        LoraLoaderMixin.save_lora_weights(
-            save_directory=args.output_dir,
-            unet_lora_layers=unet_lora_state_dict,
-            text_encoder_lora_layers=text_encoder_state_dict,
-        )
+            text_encoder.save_pretrained(os.path.join(args.output_dir, 'text_encoder'))
 
         # Final inference
         # Load previous pipeline
@@ -1350,7 +1292,10 @@ def main(args):
         pipeline = pipeline.to(accelerator.device)
 
         # load attention processors
-        pipeline.load_lora_weights(args.output_dir, weight_name="pytorch_lora_weights.safetensors")
+        pipeline.unet = Swift.from_pretrained(pipeline.unet, os.path.join(args.output_dir, 'unet'))
+        if args.train_text_encoder:
+            pipeline.text_encoder = Swift.from_pretrained(pipeline.text_encoder,
+                                                          os.path.join(args.output_dir, 'text_encoder'))
 
         # run inference
         images = []
@@ -1377,24 +1322,14 @@ def main(args):
 
         if args.push_to_hub:
             save_model_card(
-                repo_id,
+                args.hub_model_id,
                 images=images,
-                base_model=args.pretrained_model_name_or_path,
+                base_model=args.base_model_id,
                 train_text_encoder=args.train_text_encoder,
                 prompt=args.instance_prompt,
                 repo_folder=args.output_dir,
                 pipeline=pipeline,
             )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+            push_to_hub(args.hub_model_id, args.output_dir, args.hub_token)
 
     accelerator.end_training()
-
-
-if __name__ == "__main__":
-    args = parse_args()
-    main(args)

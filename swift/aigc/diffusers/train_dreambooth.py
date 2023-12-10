@@ -52,7 +52,10 @@ from packaging import version
 from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, PretrainedConfig
+from modelscope import AutoTokenizer
+from transformers import PretrainedConfig
+
+from swift import snapshot_download, push_to_hub
 
 if is_wandb_available():
     import wandb
@@ -596,6 +599,11 @@ def parse_args(input_args=None):
     if args.train_text_encoder and args.pre_compute_text_embeddings:
         raise ValueError("`--train_text_encoder` cannot be used with `--pre_compute_text_embeddings`")
 
+    args.base_model_id = args.pretrained_model_name_or_path
+    if not os.path.exists(args.pretrained_model_name_or_path):
+        args.pretrained_model_name_or_path = snapshot_download(
+            args.pretrained_model_name_or_path, revision=args.revision)
+
     return args
 
 
@@ -888,11 +896,6 @@ def main():
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
-
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
-            ).repo_id
 
     # Load the tokenizer
     if args.tokenizer_name:
@@ -1399,19 +1402,14 @@ def main():
 
         if args.push_to_hub:
             save_model_card(
-                repo_id,
+                args.hub_model_id,
                 images=images,
-                base_model=args.pretrained_model_name_or_path,
+                base_model=args.base_model_id,
                 train_text_encoder=args.train_text_encoder,
                 prompt=args.instance_prompt,
                 repo_folder=args.output_dir,
                 pipeline=pipeline,
             )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+            push_to_hub(args.hub_model_id, args.output_dir, args.hub_token)
 
     accelerator.end_training()

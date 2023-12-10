@@ -32,16 +32,14 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
-from huggingface_hub import create_repo, upload_folder
 from packaging import version
-from peft import LoraConfig
-from peft.utils import get_peft_model_state_dict
+from swift import push_to_hub, Swift, LoRAConfig, snapshot_download
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
 import diffusers
-from diffusers import AutoencoderKL, DDPMScheduler, DiffusionPipeline, StableDiffusionPipeline, UNet2DConditionModel
+from diffusers import AutoencoderKL, DDPMScheduler, DiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import compute_snr
 from diffusers.utils import check_min_version, is_wandb_available
@@ -399,6 +397,10 @@ def parse_args():
     if args.dataset_name is None and args.train_data_dir is None:
         raise ValueError("Need either a dataset name or a training folder.")
 
+    args.base_model_id = args.pretrained_model_name_or_path
+    if not os.path.exists(args.pretrained_model_name_or_path):
+        args.pretrained_model_name_or_path = snapshot_download(
+            args.pretrained_model_name_or_path, revision=args.revision)
     return args
 
 
@@ -449,10 +451,6 @@ def main():
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
-            ).repo_id
     # Load scheduler, tokenizer and models.
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
     tokenizer = CLIPTokenizer.from_pretrained(
@@ -484,7 +482,7 @@ def main():
     for param in unet.parameters():
         param.requires_grad_(False)
 
-    unet_lora_config = LoraConfig(
+    unet_lora_config = LoRAConfig(
         r=args.rank, init_lora_weights="gaussian", target_modules=["to_k", "to_q", "to_v", "to_out.0"]
     )
 
@@ -493,7 +491,7 @@ def main():
     vae.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
 
-    unet.add_adapter(unet_lora_config)
+    unet = Swift.prepare_model(unet, unet_lora_config)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -832,14 +830,7 @@ def main():
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
 
-                        unet_lora_state_dict = get_peft_model_state_dict(unet)
-
-                        StableDiffusionPipeline.save_lora_weights(
-                            save_directory=save_path,
-                            unet_lora_layers=unet_lora_state_dict,
-                            safe_serialization=True,
-                        )
-
+                        unet.save_pretrained(save_path)
                         logger.info(f"Saved state to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -897,26 +888,20 @@ def main():
     if accelerator.is_main_process:
         unet = unet.to(torch.float32)
 
-        unet_lora_state_dict = get_peft_model_state_dict(unet)
-        StableDiffusionPipeline.save_lora_weights(
-            save_directory=args.output_dir,
-            unet_lora_layers=unet_lora_state_dict,
-            safe_serialization=True,
-        )
+        unet.save_pretrained(args.output_dir)
 
         if args.push_to_hub:
             save_model_card(
-                repo_id,
+                args.hub_model_id,
                 images=images,
-                base_model=args.pretrained_model_name_or_path,
+                base_model=args.base_model_id,
                 dataset_name=args.dataset_name,
                 repo_folder=args.output_dir,
             )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
+            push_to_hub(
+                args.hub_model_id,
+                args.output_dir,
+                args.hub_token
             )
 
     # Final inference
@@ -927,7 +912,7 @@ def main():
     pipeline = pipeline.to(accelerator.device)
 
     # load attention processors
-    pipeline.unet.load_attn_procs(args.output_dir)
+    pipeline.unet = Swift.from_pretrained(pipeline.unet, args.output_dir)
 
     # run inference
     generator = torch.Generator(device=accelerator.device)
@@ -954,7 +939,3 @@ def main():
                     )
 
     accelerator.end_training()
-
-
-if __name__ == "__main__":
-    main()

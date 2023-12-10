@@ -26,7 +26,6 @@ import shutil
 from pathlib import Path
 from typing import List, Union
 
-import accelerate
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -38,13 +37,13 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from braceexpand import braceexpand
-from huggingface_hub import create_repo
 from packaging import version
-from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
+from swift import Swift, LoRAConfig, snapshot_download
 from torch.utils.data import default_collate
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer, CLIPTextModel, PretrainedConfig
+from transformers import CLIPTextModel, PretrainedConfig
+from modelscope import AutoTokenizer
 from webdataset.tariterators import (
     base_plus_ext,
     tar_file_expander,
@@ -61,7 +60,7 @@ from diffusers import (
     UNet2DConditionModel,
 )
 from diffusers.optimization import get_scheduler
-from diffusers.utils import check_min_version, is_wandb_available
+from diffusers.utils import is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 
 
@@ -70,27 +69,8 @@ MAX_SEQ_LENGTH = 77
 if is_wandb_available():
     import wandb
 
-# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.25.0.dev0")
 
 logger = get_logger(__name__)
-
-
-def get_module_kohya_state_dict(module, prefix: str, dtype: torch.dtype, adapter_name: str = "default"):
-    kohya_ss_state_dict = {}
-    for peft_key, weight in get_peft_model_state_dict(module, adapter_name=adapter_name).items():
-        kohya_key = peft_key.replace("base_model.model", prefix)
-        kohya_key = kohya_key.replace("lora_A", "lora_down")
-        kohya_key = kohya_key.replace("lora_B", "lora_up")
-        kohya_key = kohya_key.replace(".", "_", kohya_key.count(".") - 2)
-        kohya_ss_state_dict[kohya_key] = weight.to(dtype)
-
-        # Set alpha parameter
-        if "lora_down" in kohya_key:
-            alpha_key = f'{kohya_key.split(".")[0]}.alpha'
-            kohya_ss_state_dict[alpha_key] = torch.tensor(module.peft_config[adapter_name].lora_alpha).to(dtype)
-
-    return kohya_ss_state_dict
 
 
 def filter_keys(key_set):
@@ -244,11 +224,12 @@ def log_validation(vae, unet, args, accelerator, weight_dtype, step):
         torch_dtype=weight_dtype,
         safety_checker=None,
     )
+    pipeline.unet = unet
     pipeline.set_progress_bar_config(disable=True)
 
-    lora_state_dict = get_module_kohya_state_dict(unet, "lora_unet", weight_dtype)
-    pipeline.load_lora_weights(lora_state_dict)
-    pipeline.fuse_lora()
+    # lora_state_dict = get_module_kohya_state_dict(unet, "lora_unet", weight_dtype)
+    # pipeline.load_lora_weights(lora_state_dict)
+    # pipeline.fuse_lora()
 
     pipeline = pipeline.to(accelerator.device, dtype=weight_dtype)
     if args.enable_xformers_memory_efficient_attention:
@@ -757,6 +738,16 @@ def parse_args():
     if args.proportion_empty_prompts < 0 or args.proportion_empty_prompts > 1:
         raise ValueError("`--proportion_empty_prompts` must be in the range [0, 1].")
 
+    args.base_model_id = args.pretrained_teacher_model
+    if not os.path.exists(args.pretrained_teacher_model):
+        args.pretrained_teacher_model = snapshot_download(
+            args.pretrained_teacher_model, revision=args.teacher_revision)
+
+    args.vae_base_model_id = args.pretrained_vae_model_name_or_path
+    if args.pretrained_vae_model_name_or_path and not os.path.exists(args.pretrained_vae_model_name_or_path):
+        args.pretrained_vae_model_name_or_path = snapshot_download(
+            args.pretrained_vae_model_name_or_path)
+
     return args
 
 
@@ -786,7 +777,8 @@ def encode_prompt(prompt_batch, text_encoder, tokenizer, proportion_empty_prompt
     return prompt_embeds
 
 
-def main(args):
+def main():
+    args = parse_args()
     logging_dir = Path(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -821,14 +813,6 @@ def main(args):
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
-
-        if args.push_to_hub:
-            create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name,
-                exist_ok=True,
-                token=args.hub_token,
-                private=True,
-            ).repo_id
 
     # 1. Create the noise scheduler and the desired noise schedule.
     noise_scheduler = DDPMScheduler.from_pretrained(
@@ -890,7 +874,7 @@ def main(args):
         )
 
     # 8. Add LoRA to the student U-Net, only the LoRA projection matrix will be updated by the optimizer.
-    lora_config = LoraConfig(
+    lora_config = LoRAConfig(
         r=args.lora_rank,
         target_modules=[
             "to_q",
@@ -909,7 +893,7 @@ def main(args):
             "time_emb_proj",
         ],
     )
-    unet = get_peft_model(unet, lora_config)
+    unet = Swift.prepare_model(unet, lora_config)
 
     # 9. Handle mixed precision and device placement
     # For mixed precision training we cast all non-trainable weigths to half-precision
@@ -936,34 +920,6 @@ def main(args):
     alpha_schedule = alpha_schedule.to(accelerator.device)
     sigma_schedule = sigma_schedule.to(accelerator.device)
     solver = solver.to(accelerator.device)
-
-    # 10. Handle saving and loading of checkpoints
-    # `accelerate` 0.16.0 will have better support for customized saving
-    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
-        # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-        def save_model_hook(models, weights, output_dir):
-            if accelerator.is_main_process:
-                unet_ = accelerator.unwrap_model(unet)
-                lora_state_dict = get_peft_model_state_dict(unet_, adapter_name="default")
-                StableDiffusionPipeline.save_lora_weights(os.path.join(output_dir, "unet_lora"), lora_state_dict)
-                # save weights in peft format to be able to load them back
-                unet_.save_pretrained(output_dir)
-
-                for _, model in enumerate(models):
-                    # make sure to pop weight so that corresponding model is not saved again
-                    weights.pop()
-
-        def load_model_hook(models, input_dir):
-            # load the LoRA into the model
-            unet_ = accelerator.unwrap_model(unet)
-            unet_.load_adapter(input_dir, "default", is_trainable=True)
-
-            for _ in range(len(models)):
-                # pop models so that they are not loaded again
-                models.pop()
-
-        accelerator.register_save_state_pre_hook(save_model_hook)
-        accelerator.register_load_state_pre_hook(load_model_hook)
 
     # 11. Enable optimizations
     if args.enable_xformers_memory_efficient_attention:
@@ -1309,13 +1265,7 @@ def main(args):
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
-        unet.save_pretrained(args.output_dir)
-        lora_state_dict = get_peft_model_state_dict(unet, adapter_name="default")
-        StableDiffusionPipeline.save_lora_weights(os.path.join(args.output_dir, "unet_lora"), lora_state_dict)
+        unet.save_pretrained(args.output_dir, 'adapter')
+        unet.base_model.save_pretrained(args.output_dir, 'unet')
 
     accelerator.end_training()
-
-
-if __name__ == "__main__":
-    args = parse_args()
-    main(args)

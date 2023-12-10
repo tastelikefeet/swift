@@ -1,6 +1,6 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 
-from swift.aigc.run import sdxl_main
+from swift.aigc import train_dreambooth_lora_sdxl
 
 if __name__ == '__main__':
-    sdxl_main()
+    train_dreambooth_lora_sdxl()

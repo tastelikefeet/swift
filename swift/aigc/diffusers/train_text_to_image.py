@@ -33,7 +33,6 @@ from accelerate.logging import get_logger
 from accelerate.state import AcceleratorState
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
-from huggingface_hub import create_repo, upload_folder
 from packaging import version
 from torchvision import transforms
 from tqdm.auto import tqdm
@@ -47,13 +46,10 @@ from diffusers.training_utils import EMAModel, compute_snr
 from diffusers.utils import check_min_version, deprecate, is_wandb_available, make_image_grid
 from diffusers.utils.import_utils import is_xformers_available
 
+from swift import snapshot_download, push_to_hub
 
 if is_wandb_available():
     import wandb
-
-
-# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.25.0.dev0")
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -491,6 +487,10 @@ def parse_args():
     if args.non_ema_revision is None:
         args.non_ema_revision = args.revision
 
+    args.base_model_id = args.pretrained_model_name_or_path
+    if not os.path.exists(args.pretrained_model_name_or_path):
+        args.pretrained_model_name_or_path = snapshot_download(
+            args.pretrained_model_name_or_path, revision=args.revision)
     return args
 
 
@@ -541,11 +541,6 @@ def main():
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
-
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
-            ).repo_id
 
     # Load scheduler, tokenizer and models.
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
@@ -1059,13 +1054,8 @@ def main():
                 images.append(image)
 
         if args.push_to_hub:
-            save_model_card(args, repo_id, images, repo_folder=args.output_dir)
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+            save_model_card(args, args.hub_model_id, images, repo_folder=args.output_dir)
+            push_to_hub(args.hub_model_id, args.output_dir, args.hub_token)
 
     accelerator.end_training()
 
