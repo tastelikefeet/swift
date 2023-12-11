@@ -32,6 +32,7 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
+from modelscope import MsDataset
 from packaging import version
 from swift import push_to_hub, Swift, LoRAConfig, snapshot_download
 from torchvision import transforms
@@ -543,10 +544,9 @@ def main():
     # download the dataset.
     if args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
-        dataset = load_dataset(
+        dataset = MsDataset.load(
             args.dataset_name,
             args.dataset_config_name,
-            cache_dir=args.cache_dir,
             data_dir=args.train_data_dir,
         )
     else:

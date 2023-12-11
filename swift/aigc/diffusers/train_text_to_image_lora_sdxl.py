@@ -40,7 +40,7 @@ from torchvision import transforms
 from torchvision.transforms.functional import crop
 from tqdm.auto import tqdm
 from transformers import PretrainedConfig
-from modelscope import AutoTokenizer
+from modelscope import AutoTokenizer, MsDataset
 
 import diffusers
 from diffusers import (
@@ -719,8 +719,8 @@ def main():
     # download the dataset.
     if args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
-        dataset = load_dataset(
-            args.dataset_name, args.dataset_config_name, cache_dir=args.cache_dir, data_dir=args.train_data_dir
+        dataset = MsDataset.load(
+            args.dataset_name, args.dataset_config_name, data_dir=args.train_data_dir
         )
     else:
         data_files = {}
