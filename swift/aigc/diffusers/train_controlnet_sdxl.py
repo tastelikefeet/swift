@@ -49,7 +49,7 @@ from diffusers.utils.import_utils import is_xformers_available
 from packaging import version
 from torchvision import transforms
 from tqdm.auto import tqdm
-from modelscope import AutoTokenizer
+from modelscope import AutoTokenizer, MsDataset
 from transformers import PretrainedConfig
 
 from swift import snapshot_download, push_to_hub
@@ -612,11 +612,10 @@ def get_train_dataset(args, accelerator):
     # download the dataset.
     if args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
-        dataset = load_dataset(
+        dataset = MsDataset.load(
             args.dataset_name,
             args.dataset_config_name,
-            cache_dir=args.cache_dir,
-        )
+        ).to_hf_dataset()
     else:
         if args.train_data_dir is not None:
             dataset = load_dataset(
