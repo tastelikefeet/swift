@@ -822,7 +822,8 @@ def encode_prompt(prompt_batch, text_encoders, tokenizers, proportion_empty_prom
     return prompt_embeds, pooled_prompt_embeds
 
 
-def main(args):
+def main():
+    args = parse_args()
     logging_dir = Path(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)

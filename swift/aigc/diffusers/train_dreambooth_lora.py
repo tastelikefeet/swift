@@ -1172,6 +1172,11 @@ def main():
 
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
+                        accelerator.unwrap_model(unet).to(torch.float32).save_pretrained(os.path.join(save_path, 'unet'))
+
+                        if args.train_text_encoder:
+                            accelerator.unwrap_model(text_encoder).save_pretrained(
+                                os.path.join(save_path, 'text_encoder'))
                         logger.info(f"Saved state to {save_path}")
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}

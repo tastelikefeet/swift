@@ -1433,6 +1433,13 @@ def main():
 
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
+                        accelerator.unwrap_model(unet).to(torch.float32).save_pretrained(os.path.join(save_path, 'unet'))
+
+                        if args.train_text_encoder:
+                            accelerator.unwrap_model(text_encoder_one).save_pretrained(
+                                os.path.join(save_path, 'text_encoder1'))
+                            accelerator.unwrap_model(text_encoder_two).save_pretrained(
+                                os.path.join(save_path, 'text_encoder2'))
                         logger.info(f"Saved state to {save_path}")
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -1523,13 +1530,13 @@ def main():
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
         unet = unet.to(torch.float32)
-        unet.save_pretrained(os.path.join(args.output_dir, 'unet'))
+        unet.save_pretrained(os.path.join(args.output_dir, 'iter-last', 'unet'))
 
         if args.train_text_encoder:
             text_encoder_one = accelerator.unwrap_model(text_encoder_one)
-            text_encoder_one.save_pretrained(os.path.join(args.output_dir, 'text_encoder1'))
+            text_encoder_one.save_pretrained(os.path.join(args.output_dir, 'iter-last', 'text_encoder1'))
             text_encoder_two = accelerator.unwrap_model(text_encoder_two)
-            text_encoder_two.save_pretrained(os.path.join(args.output_dir, 'text_encoder2'))
+            text_encoder_two.save_pretrained(os.path.join(args.output_dir, 'iter-last', 'text_encoder2'))
 
         # Final inference
         # Load previous pipeline
@@ -1562,12 +1569,12 @@ def main():
         pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config, **scheduler_args)
 
         # load attention processors
-        pipeline.unet = Swift.from_pretrained(pipeline.unet, os.path.join(args.output_dir, 'unet'))
+        pipeline.unet = Swift.from_pretrained(pipeline.unet, os.path.join(args.output_dir, 'iter-last', 'unet'))
         if args.train_text_encoder:
             pipeline.text_encoder_one = Swift.from_pretrained(pipeline.text_encoder_one,
-                                                              os.path.join(args.output_dir, 'text_encoder1'))
+                                                              os.path.join(args.output_dir, 'iter-last', 'text_encoder1'))
             pipeline.text_encoder_two = Swift.from_pretrained(pipeline.text_encoder_two,
-                                                              os.path.join(args.output_dir, 'text_encoder2'))
+                                                              os.path.join(args.output_dir, 'iter-last', 'text_encoder2'))
 
         # run inference
         images = []
@@ -1601,9 +1608,9 @@ def main():
                 train_text_encoder=args.train_text_encoder,
                 instance_prompt=args.instance_prompt,
                 validation_prompt=args.validation_prompt,
-                repo_folder=args.output_dir,
+                repo_folder=os.path.join(args.output_dir, 'iter-last'),
                 vae_path=args.vae_base_model_id,
             )
-            push_to_hub(args.hub_model_id, args.output_dir, args.hub_token)
+            push_to_hub(args.hub_model_id, os.path.join(args.output_dir, 'iter-last'), args.hub_token)
 
     accelerator.end_training()
