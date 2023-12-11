@@ -233,7 +233,7 @@ class Text2ImageDataset:
 def log_validation(vae, unet, args, accelerator, weight_dtype, step):
     logger.info("Running validation... ")
 
-    unet = accelerator.unwrap_model(unet)
+    unet = accelerator.unwrap_model(unet.base_model)
     pipeline = StableDiffusionXLPipeline.from_pretrained(
         args.pretrained_teacher_model,
         vae=vae,

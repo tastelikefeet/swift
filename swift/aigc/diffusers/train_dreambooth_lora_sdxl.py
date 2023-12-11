@@ -55,8 +55,6 @@ from transformers import PretrainedConfig
 
 from swift import LoRAConfig, Swift, snapshot_download, push_to_hub
 
-# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.25.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -1469,7 +1467,7 @@ def main():
                     vae=vae,
                     text_encoder=accelerator.unwrap_model(text_encoder_one),
                     text_encoder_2=accelerator.unwrap_model(text_encoder_two),
-                    unet=accelerator.unwrap_model(unet),
+                    unet=accelerator.unwrap_model(unet.base_model),
                     revision=args.revision,
                     variant=args.variant,
                     torch_dtype=weight_dtype,

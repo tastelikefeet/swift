@@ -57,9 +57,6 @@ from diffusers.utils import check_min_version, is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 
 
-# Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.25.0.dev0")
-
 logger = get_logger(__name__)
 
 
@@ -1193,7 +1190,7 @@ def main():
                 # create pipeline
                 pipeline = DiffusionPipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
-                    unet=accelerator.unwrap_model(unet),
+                    unet=accelerator.unwrap_model(unet.base_model),
                     text_encoder=None if args.pre_compute_text_embeddings else accelerator.unwrap_model(text_encoder),
                     revision=args.revision,
                     variant=args.variant,
