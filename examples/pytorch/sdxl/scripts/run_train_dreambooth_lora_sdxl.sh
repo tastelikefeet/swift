@@ -1,3 +1,4 @@
+PYTHONPATH=../../.. \
 accelerate launch train_dreambooth_lora_sdxl.py \
   --pretrained_model_name_or_path="AI-ModelScope/stable-diffusion-xl-base-1.0"  \
   --instance_data_dir="./xrx" \
