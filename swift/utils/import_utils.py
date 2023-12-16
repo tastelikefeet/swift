@@ -12,6 +12,14 @@ from .logger import get_logger
 logger = get_logger()  # pylint: disable=invalid-name
 
 
+def is_fastapi_available() -> bool:
+    return importlib.util.find_spec("fastapi") is not None
+
+
+def is_vllm_available() -> bool:
+    return importlib.util.find_spec("vllm") is not None
+
+
 class _LazyModule(ModuleType):
     """
     Module class that surfaces all objects but only performs associated imports when the objects are requested.

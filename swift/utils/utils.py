@@ -1,8 +1,12 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
+import asyncio
 import datetime as dt
 import os
 import re
+import socket
+import sys
 import time
+from asyncio.subprocess import PIPE, STDOUT
 from typing import (Any, Callable, List, Mapping, Optional, Sequence, Tuple,
                     Type, TypeVar)
 
@@ -54,9 +58,10 @@ def add_version_to_work_dir(work_dir: str) -> str:
     """add version"""
     version = _get_version(work_dir)
     time = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+    sub_folder = f'v{version}-{time}'
     if dist.is_initialized() and is_dist():
-        time = broadcast_string(time)
-    work_dir = os.path.join(work_dir, f'v{version}-{time}')
+        sub_folder = broadcast_string(sub_folder)
+    work_dir = os.path.join(work_dir, sub_folder)
     return work_dir
 
 
@@ -130,3 +135,49 @@ def read_multi_line() -> str:
             res[-1] = text[:-2]
             break
     return ''.join(res)
+
+
+async def run_and_get_log(*args, timeout=None):
+    process = await asyncio.create_subprocess_exec(
+        *args, stdout=PIPE, stderr=STDOUT)
+    lines = []
+    while True:
+        try:
+            line = await asyncio.wait_for(process.stdout.readline(), timeout)
+        except asyncio.TimeoutError:
+            break
+        else:
+            if not line:
+                break
+            else:
+                lines.append(str(line))
+    return process, lines
+
+
+def run_command_in_subprocess(*args, timeout):
+    if sys.platform == 'win32':
+        loop = asyncio.ProactorEventLoop()
+        asyncio.set_event_loop(loop)
+    else:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    process, lines = loop.run_until_complete(
+        run_and_get_log(*args, timeout=timeout))
+    return (loop, process), lines
+
+
+def close_loop(handler):
+    loop, process = handler
+    process.kill()
+    loop.close()
+
+
+def find_free_port() -> str:
+    # Copied from https://github.com/facebookresearch/detectron2/blob/main/detectron2/engine/launch.py # noqa: E501
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    # Binding to port 0 will cause the OS to find an available port for us
+    sock.bind(('', 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    # NOTE: there is still a chance the port could be taken by other processes.
+    return port
