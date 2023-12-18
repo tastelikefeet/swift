@@ -144,3 +144,18 @@ class BaseUI:
         cls.lang = lang
         for sub_ui in cls.sub_ui:
             sub_ui.lang = lang
+
+    @classmethod
+    def find_process(cls, keyword):
+        import psutil
+        all_cmds = []
+        for pid in psutil.pids():
+            cmdline = psutil.Process(pid).cmdline()
+            if keyword in cmdline:
+                all_cmds.append(f'{pid}:{cmdline}')
+        return all_cmds
+
+    @classmethod
+    def kill_process(cls, pid):
+        import psutil
+        psutil.Process(pid).kill()

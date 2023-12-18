@@ -119,7 +119,7 @@ class LLMInfer(BaseUI):
                     cls.reset_memory, [], [model_and_template],
                     show_progress=False, queue=True).then(
                         cls.prepare_checkpoint, [], [model_and_template],
-                        show_progress=True, queue=True)
+                        show_progress=True)
                 cls.element('load_checkpoint').click(
                     cls.clear_session, inputs=[], outputs=[prompt, chatbot], queue=True)
 

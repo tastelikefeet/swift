@@ -102,8 +102,24 @@ class Model(BaseUI):
             system = gr.Textbox(elem_id='system', lines=1, scale=20)
         Generate.build_ui(base_tab)
         with gr.Row():
-            gr.Textbox(elem_id='more_params', lines=1, scale=20)
+            gr.Textbox(elem_id='more_params', lines=1, scale=10)
+            running_cmds = gr.Dropdown(elem_id='running_cmds', choices=cls.find_process(''), scale=10)
             gr.Button(elem_id='load_checkpoint', scale=2, variant='primary')
+            kill = gr.Button(elem_id='kill', scale=2)
+
+        def select_runtime(running_cmd: str):
+            cmd = running_cmd[:running_cmd.rindex('2>&1')]
+            cmd = cmd[cmd.rindex('>') + 1:]
+            cmd = cmd[:cmd.rindex('run.log')]
+            logging_dir = cmd.strip()
+            logging_dir = logging_dir if not logging_dir.endswith(os.sep) else logging_dir[:-1]
+            return running_cmd + ' &'
+
+        def kill_deployment(cmdline):
+            pid, cmdline = cmdline.split(':')
+            cls.kill_process(pid)
+            time.sleep(1)
+            return gr.update(choices=cls.find_process('swift sft'))
 
         def update_input_model(choice):
             if choice == base_tab.locale('checkpoint', cls.lang)['value']:
@@ -137,6 +153,16 @@ class Model(BaseUI):
                 TEMPLATE_MAPPING[MODEL_MAPPING[base_model_type]['template']]
                 ['template'], 'default_system', None)
             return sft_args['system'] or system, sft_args['template_type']
+
+        running_cmds.change(
+            select_runtime,
+            inputs=[running_cmds],
+            outputs=[running_cmds])
+
+        kill.click(
+            kill_deployment,
+            inputs=[running_cmds],
+            outputs=[running_cmds])
 
         model_type.change(
             update_input_model,

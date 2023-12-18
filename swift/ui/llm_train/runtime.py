@@ -1,5 +1,7 @@
 import os.path
+import time
 import webbrowser
+from functools import partial
 from typing import Dict, List, Tuple, Type
 
 import gradio as gr
@@ -29,6 +31,18 @@ class Runtime(BaseUI):
                 'en':
                 'tensorboard not found, install it by pip install tensorboard',
             }
+        },
+        'running_cmds': {
+            'label': {
+                'zh': '运行中的训练',
+                'en': 'All running instances'
+            },
+        },
+        'kill': {
+            'label': {
+                'zh': '终止进程',
+                'en': 'Kill Process'
+            },
         },
         'running_cmd': {
             'label': {
@@ -88,8 +102,15 @@ class Runtime(BaseUI):
 
     @classmethod
     def do_build_ui(cls, base_tab: Type['BaseUI']):
-        with gr.Accordion(elem_id='runtime_tab', open=True, visible=False):
+        with gr.Accordion(elem_id='runtime_tab', open=False, visible=True):
             with gr.Blocks():
+                with gr.Row():
+                    gr.Dropdown(
+                        elem_id='running_cmds',
+                        scale=20,
+                        choices=cls.find_process('swift sft'),
+                        interactive=True)
+                    gr.Button(elem_id='kill', scale=2)
                 with gr.Row():
                     gr.Textbox(
                         elem_id='running_cmd',
@@ -109,10 +130,23 @@ class Runtime(BaseUI):
                     gr.Button(elem_id='start_tb', scale=2, variant='primary')
                     gr.Button(elem_id='close_tb', scale=2)
 
+                base_tab.element('running_cmds').change(
+                    Runtime.select_runtime,
+                    [base_tab.element('running_cmds')],
+                    [base_tab.element('running_cmd'), base_tab.element('logging_dir'),
+                     base_tab.element('tb_url')],
+                )
+
                 base_tab.element('show_log').click(
                     Runtime.show_log,
                     [base_tab.element('logging_dir')],
                     [],
+                )
+
+                base_tab.element('kill').click(
+                    Runtime.kill,
+                    [base_tab.element('running_cmds')],
+                    [base_tab.element('running_cmds')],
                 )
 
                 base_tab.element('start_tb').click(
@@ -128,16 +162,36 @@ class Runtime(BaseUI):
                 )
 
     @classmethod
+    def select_runtime(cls, running_cmd: str):
+        cmd = running_cmd[:running_cmd.rindex('2>&1')]
+        cmd = cmd[cmd.rindex('>')+1:]
+        cmd = cmd[:cmd.rindex('run.log')]
+        logging_dir = cmd.strip()
+        logging_dir = logging_dir if not logging_dir.endswith(os.sep) else logging_dir[:-1]
+        return running_cmd + ' &', logging_dir, cls.handlers.get(logging_dir)
+
+
+    @classmethod
+    def kill(cls, cmdline):
+        pid, cmdline = cmdline.split(':')
+        cls.kill_process(pid)
+        time.sleep(1)
+        return gr.update(choices=cls.find_process('swift sft'))
+
+
+    @classmethod
     def show_log(cls, logging_dir):
         webbrowser.open(
             'file://' + os.path.join(logging_dir, 'run.log'), new=2)
 
     @classmethod
-    def start_tb(cls, logging_dir):
+    def start_tb(cls, logging_dir: str):
         if not is_tensorboard_available():
             gr.Error(cls.locale('tb_not_found', cls.lang)['value'])
             return ''
 
+        logging_dir = logging_dir.strip()
+        logging_dir = logging_dir if not logging_dir.endswith(os.sep) else logging_dir[:-1]
         if logging_dir in cls.handlers:
             return cls.handlers[logging_dir][1]
 
