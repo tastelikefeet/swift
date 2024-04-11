@@ -1,6 +1,6 @@
 CUDA_VISIBLE_DEVICES=0 \
 swift eval \
-    --ckpt_dir "output/qwen-7b-chat/vx-xxx/checkpoint-xxx" \
+    --model_type qwen-7b-chat \
     --eval_dataset arc \
     --eval_limit 10 \
     --infer_backend pt \
