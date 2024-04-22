@@ -176,6 +176,15 @@ def run_eval_single_model(args: EvalArguments, model_name, record=None):
         task_config.use_cache = args.eval_use_cache
         if args.eval_limit:
             task_config.limit = args.eval_limit
+        if task_config.datasets[0] == 'cmmlu':
+            print('>>>>> Setting cmmlu limit to 30')
+            task_config.limit = 30
+        if task_config.datasets[0] == 'mmlu':
+            print('>>>>> Setting mmlu limit to 50')
+            task_config.limit = 50
+        if task_config.datasets[0] == 'bbh':
+            print('>>>>> Setting bbh limit to 100')
+            task_config.limit = 100
         if args.eval_few_shot is not None:
             for dataset in task_config.datasets:
                 if not task_config.dataset_args.get(dataset):

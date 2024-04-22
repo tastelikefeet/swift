@@ -217,6 +217,23 @@
           "sft_type": "full",
           "train_dataset_mix_ratio": 0.0
         }
+      },
+      {
+        "name": "llama3+lora",
+        "info": "llama3 lora训练",
+        "requirements":{
+          "gpu": "8",
+          "ddp": "8"
+        },
+        "args": {
+          "sft_type": "lora",
+          "lora_target_modules": "ALL",
+          "lora_rank": 8,
+          "lora_alpha": 32,
+          "gradient_accumulation_steps": 1,
+          "batch_size": 2,
+          "model_type": "llama3-8b-instruct"
+        }
       }
     ]
 }
