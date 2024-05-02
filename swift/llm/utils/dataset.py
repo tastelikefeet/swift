@@ -1034,6 +1034,82 @@ def _repair_planner(conversations: list) -> list:
     return conversations
 
 
+def load_dataset_by_lines(file):
+    from datasets import Dataset
+    lists = []
+    with open(file, 'w') as f:
+        for line in f.readlines():
+            lists.append(json.loads(line))
+    return Dataset.from_list(lists)
+
+
+def get_local_dataset(dataset_id, *args, **kwargs):
+    from datasets import load_dataset
+    if dataset_id == 'toolbench_formatted':
+        ds1 = load_dataset_by_lines('/mnt/workspace/yzhao/tastelikefeet/swift/toolbench_train_formatted.jsonl')
+        ds2 = load_dataset_by_lines('/mnt/workspace/yzhao/tastelikefeet/swift/toolbench_eval_formatted.jsonl')
+        ds = concatenate_datasets([ds1['train'], ds2['train']])
+        return ds
+    else:
+        ds1 = load_dataset_by_lines('/mnt/workspace/yzhao/tastelikefeet/swift/toolbench_train_origin.jsonl')
+        ds2 = load_dataset_by_lines('/mnt/workspace/yzhao/tastelikefeet/swift/toolbench_eval_origin.jsonl')
+        ds = concatenate_datasets([ds1['train'], ds2['train']])
+        return ds
+
+
+def preprocess_local_dataset(dataset):
+    def preprocess(row):
+        system = None
+        history = []
+        query = None
+        response = None
+        temp = None
+        for i, rd in enumerate(row):
+            if rd['from'] == 'system':
+                system = rd['value']
+            elif rd['from'] == 'user':
+                if temp is not None:
+                    rd['value'] = temp + '\n' + rd['value']
+                    temp = None
+                history.append([rd['value'], None])
+            elif rd['from'] == 'assistant':
+                history[-1][-1] = rd['value']
+            elif rd['from'] == 'function':
+                if i == len(row) - 1 or row[i+1]['from'] == 'assistant':
+                    history.append([rd['value'], None])
+                else:
+                    temp = rd['value']
+
+        query, response = history.pop(-1)
+
+        return {
+            'system': system,
+            'query': query,
+            'response': response,
+            'history': history,
+        }
+
+    return dataset.map(preprocess)
+
+
+
+register_dataset(
+    'toolbench_formatted',
+    'toolbench_formatted', [], [],
+    preprocess_local_dataset,
+    get_local_dataset,
+    tags=[])
+
+
+register_dataset(
+    'toolbench_origin',
+    'toolbench_origin', [], [],
+    preprocess_local_dataset,
+    get_local_dataset,
+    tags=[])
+
+
+
 register_dataset(
     DatasetName.capcha_images,
     'AI-ModelScope/captcha-images', [('default', 'train')], [('default', 'validation')],
