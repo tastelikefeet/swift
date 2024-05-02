@@ -146,6 +146,9 @@ def llm_sft(args: SftArguments) -> Dict[str, Union[str, Any]]:
             val_dataset = val_dataset.select(val_idxs)
 
     train_dataset = args.handle_dataset_mixture(train_dataset)
+    # if os.environ.get('outline', None) == '1':
+    train_dataset = train_dataset.filter(lambda row: 'outline' in str(row))
+    val_dataset = val_dataset.filter(lambda row: 'outline' in str(row))
 
     # add self-cognition dataset
     if args.self_cognition_sample > 0:

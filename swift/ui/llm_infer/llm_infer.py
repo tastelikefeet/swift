@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import time
+from copy import deepcopy
 from datetime import datetime
 from functools import partial
 from typing import Type
@@ -14,7 +15,7 @@ from modelscope import GenerationConfig
 
 from swift import snapshot_download
 from swift.llm import (DeployArguments, InferArguments, XRequestConfig, inference_client, inference_stream,
-                       limit_history_length, prepare_model_template)
+                       limit_history_length, prepare_model_template, inference)
 from swift.ui.base import BaseUI
 from swift.ui.llm_infer.model import Model
 from swift.ui.llm_infer.runtime import Runtime
@@ -43,11 +44,11 @@ class LLMInfer(BaseUI):
         'load_alert': {
             'value': {
                 'zh':
-                '加载中，请等待' if is_inference else '部署中，请点击"展示部署状态"查看',
+                    '加载中，请等待' if is_inference else '部署中，请点击"展示部署状态"查看',
                 'en':
-                'Start to load model, please wait' if is_inference else 'Start to deploy model, '
-                'please Click "Show running '
-                'status" to view details',
+                    'Start to load model, please wait' if is_inference else 'Start to deploy model, '
+                                                                            'please Click "Show running '
+                                                                            'status" to view details',
             }
         },
         'loaded_alert': {
@@ -332,8 +333,14 @@ class LLMInfer(BaseUI):
             os.environ['CUDA_VISIBLE_DEVICES'] = gpus
         infer_args = InferArguments(**kwargs)
         model, template = prepare_model_template(infer_args)
+        infer_args.sft_type = 'lora'
+        infer_args.model_type = 'llama3-8b-instruct'
+        infer_args.template = 'llama3'
+        infer_args.model_id_or_path = None
+        infer_args.ckpt_dir = '/mnt/workspace/yzhao/tastelikefeet/swift/examples/pytorch/llm/output/llama3-8b-instruct/v36-20240502-115758/checkpoint-80'
+        model_outline, template_outline = prepare_model_template(infer_args)
         gr.Info(cls.locale('loaded_alert', cls.lang)['value'])
-        return [model, template]
+        return [model, model_outline, template, template_outline]
 
     @classmethod
     def clear_session(cls):
@@ -355,7 +362,7 @@ class LLMInfer(BaseUI):
         request_config = XRequestConfig(
             temperature=temperature, top_k=top_k, top_p=top_p, repetition_penalty=repetition_penalty)
         request_config.stream = True
-        request_config.stop = ['Observation:']
+        request_config.stop = ['Observation:', '.', '?']
         stream_resp_with_history = ''
         if not template_type.endswith('generation'):
             stream_resp = inference_client(
@@ -380,7 +387,7 @@ class LLMInfer(BaseUI):
         if not model_and_template:
             gr.Warning(cls.locale('generate_alert', cls.lang)['value'])
             return '', None
-        model, template = model_and_template
+        model, model_outline, template, template_outline = model_and_template
         if os.environ.get('MODELSCOPE_ENVIRONMENT') == 'studio':
             model.cuda()
         if not template_type.endswith('generation'):
@@ -393,12 +400,53 @@ class LLMInfer(BaseUI):
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
+            do_sample=True,
             max_new_tokens=int(max_new_tokens),
             repetition_penalty=repetition_penalty)
+        # gen = inference_stream(
+        #     model,
+        #     template,
+        #     prompt,
+        #     history,
+        #     system=system,
+        #     generation_config=generation_config,
+        #     stop_words=['Observation:', 'Thought:'])
+        # total_history = []
+        # for _, history in gen:
+        #     total_history = old_history + history
+        #     yield '', total_history
+        # if total_history[-1][-1].endswith('Thought:'):
+        if history:
+            history[-1][-1] = history[-1][-1] + '\nThought:'
+        else:
+            history.append([prompt, 'Thought:'])
+        for i in range(2):
+            outline, _ = inference(
+                model_outline,
+                template_outline,
+                None,
+                deepcopy(history),
+                system=system,
+                stop_words=['.', '。', '?', '？'],
+                generation_config=generation_config)
+            outline = outline.replace('<|start_header_id|>assistant<|end_header_id|>\n\n', '')
+            history[-1][-1] = history[-1][-1] + outline
+            answer, _ = inference(
+                model,
+                template,
+                None,
+                deepcopy(history),
+                system=system,
+                stop_words=['.', '。', '?', '？'],
+                generation_config=generation_config)
+            answer = answer.replace('<|start_header_id|>assistant<|end_header_id|>\n\n', '')
+            answer = answer.replace('assistant<|end_header_id|>', '')
+            history[-1][-1] = history[-1][-1] + answer
+            # history.append([outline, answer])
         gen = inference_stream(
             model,
             template,
-            prompt,
+            None,
             history,
             system=system,
             generation_config=generation_config,
@@ -406,5 +454,6 @@ class LLMInfer(BaseUI):
         for _, history in gen:
             total_history = old_history + history
             yield '', total_history
+
         if os.environ.get('MODELSCOPE_ENVIRONMENT') == 'studio':
             model.cpu()

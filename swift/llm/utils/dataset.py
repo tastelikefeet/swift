@@ -1036,10 +1036,11 @@ def _repair_planner(conversations: list) -> list:
 
 def load_dataset_by_lines(file):
     from datasets import Dataset
+    import ast
     lists = []
-    with open(file, 'w') as f:
+    with open(file, 'r') as f:
         for line in f.readlines():
-            lists.append(json.loads(line))
+            lists.append({"conversations": ast.literal_eval(line)})
     return Dataset.from_list(lists)
 
 
@@ -1048,13 +1049,13 @@ def get_local_dataset(dataset_id, *args, **kwargs):
     if dataset_id == 'toolbench_formatted':
         ds1 = load_dataset_by_lines('/mnt/workspace/yzhao/tastelikefeet/swift/toolbench_train_formatted.jsonl')
         ds2 = load_dataset_by_lines('/mnt/workspace/yzhao/tastelikefeet/swift/toolbench_eval_formatted.jsonl')
-        ds = concatenate_datasets([ds1['train'], ds2['train']])
-        return ds
+        ds = concatenate_datasets([ds1, ds2])
+        return preprocess_local_dataset(ds)
     else:
         ds1 = load_dataset_by_lines('/mnt/workspace/yzhao/tastelikefeet/swift/toolbench_train_origin.jsonl')
         ds2 = load_dataset_by_lines('/mnt/workspace/yzhao/tastelikefeet/swift/toolbench_eval_origin.jsonl')
-        ds = concatenate_datasets([ds1['train'], ds2['train']])
-        return ds
+        ds = concatenate_datasets([ds1, ds2])
+        return preprocess_local_dataset(ds)
 
 
 def preprocess_local_dataset(dataset):
@@ -1064,10 +1065,17 @@ def preprocess_local_dataset(dataset):
         query = None
         response = None
         temp = None
+        row = row['conversations']
         for i, rd in enumerate(row):
             if rd['from'] == 'system':
                 system = rd['value']
             elif rd['from'] == 'user':
+                if i != len(row) - 1 and row[i+1]['from'] == 'user':
+                    if temp is None:
+                        temp = rd['value']
+                    else:
+                        temp = temp + '\n' + rd['value']
+                    continue
                 if temp is not None:
                     rd['value'] = temp + '\n' + rd['value']
                     temp = None
@@ -1078,9 +1086,14 @@ def preprocess_local_dataset(dataset):
                 if i == len(row) - 1 or row[i+1]['from'] == 'assistant':
                     history.append([rd['value'], None])
                 else:
-                    temp = rd['value']
+                    if temp is None:
+                        temp = rd['value']
+                    else:
+                        temp = temp + '\n' + rd['value']
 
         query, response = history.pop(-1)
+        # if os.environ['outline'] == '1':
+        #     system = system + '\n' + 'You are a good assistant of doing plans, only give outlnes in your outputs.'
 
         return {
             'system': system,
@@ -1089,23 +1102,25 @@ def preprocess_local_dataset(dataset):
             'history': history,
         }
 
-    return dataset.map(preprocess)
+    dataset = dataset.map(preprocess).filter(lambda row: row['query'] is not None)
+    print('dataset len:', len(dataset))
+    return dataset
 
 
 
 register_dataset(
     'toolbench_formatted',
     'toolbench_formatted', [], [],
-    preprocess_local_dataset,
-    get_local_dataset,
+    preprocess_func=preprocess_local_dataset,
+    get_function=get_local_dataset,
     tags=[])
 
 
 register_dataset(
     'toolbench_origin',
     'toolbench_origin', [], [],
-    preprocess_local_dataset,
-    get_local_dataset,
+    preprocess_func=preprocess_local_dataset,
+    get_function=get_local_dataset,
     tags=[])
 
 
