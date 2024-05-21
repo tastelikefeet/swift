@@ -10,7 +10,7 @@ from packaging import version
 from swift.torchacc_utils import consolidate_checkpoint
 from swift.trainers import TrainerCallback
 from swift.tuners import (AdaLoraConfig, AdapterConfig, BOFTConfig, IA3Config, LongLoRAModelType, LoraConfig,
-                          LoRAConfig, NEFTuneConfig, Swift, VeraConfig)
+                          LoRAConfig, NEFTuneConfig, Swift, VeraConfig, NewLayersConfig)
 from swift.tuners.llamapro import LLaMAProConfig
 from swift.tuners.module_mapping import MODEL_KEYS_MAPPING
 from swift.utils import activate_model_parameters, freeze_model_parameters, get_logger, use_torchacc
@@ -223,6 +223,12 @@ def prepare_model(model, args: SftArguments):
                 )
                 model = Swift.prepare_model(model, boft_config)
                 logger.info(f'boft_config: {boft_config}')
+            elif args.sft_type == 'new_layer':
+                new_config = NewLayersConfig(
+                    num_new_blocks=4
+                )
+                model = Swift.prepare_model(model, new_config)
+                logger.info(f'new_config: {new_config}')
         else:
             if use_torchacc():
                 consolidate_checkpoint(args.resume_from_checkpoint, 'adapter_model')

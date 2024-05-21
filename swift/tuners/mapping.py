@@ -10,6 +10,7 @@ from .restuning import ResTuning, ResTuningConfig
 from .rome import Rome, RomeConfig
 from .scetuning.scetuning import SCETuning, SCETuningConfig
 from .side import Side, SideConfig
+from .new_layers import NewLayers, NewLayersConfig
 
 
 class SwiftTuners:
@@ -23,6 +24,7 @@ class SwiftTuners:
     NEFTUNE = 'neftune'
     LLAMAPRO = 'LLAMAPRO'
     SCETUNING = 'SCETuning'
+    NEWLAYERS = 'NewLayers'
 
 
 SWIFT_MAPPING = {
@@ -36,4 +38,5 @@ SWIFT_MAPPING = {
     SwiftTuners.NEFTUNE: (NEFTuneConfig, NEFTune),
     SwiftTuners.SCETUNING: (SCETuningConfig, SCETuning),
     SwiftTuners.LLAMAPRO: (LLaMAProConfig, LLaMAPro),
+    SwiftTuners.NEWLAYERS: (NewLayersConfig, NewLayers),
 }

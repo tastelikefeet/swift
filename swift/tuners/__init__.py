@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from .neftune import NEFTune, NEFTuneConfig
     from .longlora.longlora import LongLoRAModelType, LongLoRAConfig, LongLoRA
     from .restuning import ResTuning, ResTuningConfig, ResTuningBypassModule
+    from .new_layers import NewLayersConfig, NewLayers
     from .peft import (AdaLoraConfig, IA3Config, LoftQConfig, LoHaConfig, LoKrConfig, LoraConfig, VeraConfig,
                        BOFTConfig, OFTConfig, PeftConfig, PeftModel, PeftModelForCausalLM, PeftModelForSeq2SeqLM,
                        PeftModelForSequenceClassification, PeftModelForTokenClassification, PrefixTuningConfig,
@@ -29,6 +30,7 @@ else:
         'mapping': ['SWIFT_MAPPING', 'SwiftTuners'],
         'side': ['Side', 'SideConfig', 'SideModule'],
         'neftune': ['NEFTune', 'NEFTuneConfig'],
+        'new_layers': ['NewLayers', 'NewLayersConfig'],
         'restuning': ['ResTuning', 'ResTuningConfig', 'ResTuningBypassModule'],
         'peft': [
             'AdaLoraConfig', 'IA3Config', 'LoftQConfig', 'LoHaConfig', 'LoKrConfig', 'LoraConfig', 'VeraConfig',
