@@ -198,12 +198,12 @@ def llm_sft(args: SftArguments) -> Dict[str, Union[str, Any]]:
         total_history = []
         for row in sub_set:
             assert not row.get('system')
-            history = row['history'] or []
+            history = row.get('history') or []
             history.append([row['query'], row['response']])
             total_history.extend(history)
         query, response = total_history.pop(-1)
         new_dataset.append({'history': total_history, 'query': query, 'response': response})
-    train_dataset = concatenate_datasets([train_dataset, new_dataset])
+    train_dataset = concatenate_datasets([train_dataset, Dataset.from_list(new_dataset)])
     # ========================================
 
     training_args.train_dataset_sample = train_dataset.shape[0] if train_dataset is not None else 0

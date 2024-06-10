@@ -18,6 +18,13 @@
         "dataset_id": "wyj123456/GPT4all",
         "tags": ["chat", "general"]
     },
+    "gsm8k": {
+        "dataset_id": "modelscope/gsm8k",
+        "subsets": ["main"],
+        "split": ["train"],
+        "columns": {"question": "query", "answer": "response"},
+        "tags": ["math", "general"]
+    },
     "cot-zh": {
         "dataset_id": "YorickHe/CoT_zh",
         "tags": ["chat", "general"]
