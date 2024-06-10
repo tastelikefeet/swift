@@ -7,7 +7,7 @@ import json
 import numpy as np
 import torch
 import torch.distributed as dist
-from datasets import Dataset
+from datasets import Dataset, concatenate_datasets
 from modelscope import BitsAndBytesConfig, GenerationConfig
 from transformers import IntervalStrategy
 from transformers.integrations import is_deepspeed_zero3_enabled
@@ -188,6 +188,24 @@ def llm_sft(args: SftArguments) -> Dict[str, Union[str, Any]]:
             model_author=args.model_author)
 
     train_dataset, val_dataset = args._handle_dataset_compat(train_dataset, val_dataset)
+
+    # ========================================
+    half_len = len(train_dataset)
+    new_dataset = []
+    for i in range(half_len):
+        n = np.random.choice([2,3,4,5,6,7,8])
+        sub_set = train_dataset.select(np.random.random_sample(n))
+        total_history = []
+        for row in sub_set:
+            assert not row.get('system')
+            history = row['history'] or []
+            history.append([row['query'], row['response']])
+            total_history.extend(history)
+        query, response = total_history.pop(-1)
+        new_dataset.append({'history': total_history, 'query': query, 'response': response})
+    train_dataset = concatenate_datasets([train_dataset, new_dataset])
+    # ========================================
+
     training_args.train_dataset_sample = train_dataset.shape[0] if train_dataset is not None else 0
     logger.info(f'train_dataset: {train_dataset}')
     logger.info(f'val_dataset: {val_dataset}')
