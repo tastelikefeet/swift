@@ -12,7 +12,7 @@ import json
 import torch
 from gradio import Accordion, Tab
 
-from swift.llm import SftArguments
+from swift.llm import RLHFArguments
 from swift.ui.base import BaseUI
 from swift.ui.llm_train.advanced import Advanced
 from swift.ui.llm_train.dataset import Dataset
@@ -185,9 +185,9 @@ class LLMTrain(BaseUI):
         },
     }
 
-    choice_dict = BaseUI.get_choices_from_dataclass(SftArguments)
-    default_dict = BaseUI.get_default_value_from_dataclass(SftArguments)
-    arguments = BaseUI.get_argument_names(SftArguments)
+    choice_dict = BaseUI.get_choices_from_dataclass(RLHFArguments)
+    default_dict = BaseUI.get_default_value_from_dataclass(RLHFArguments)
+    arguments = BaseUI.get_argument_names(RLHFArguments)
 
     @classmethod
     def do_build_ui(cls, base_tab: Type['BaseUI']):
@@ -274,7 +274,7 @@ class LLMTrain(BaseUI):
     @classmethod
     def train(cls, *args):
         ignore_elements = ('model_type', 'logging_dir', 'more_params')
-        sft_args = cls.get_default_value_from_dataclass(SftArguments)
+        sft_args = cls.get_default_value_from_dataclass(RLHFArguments)
         kwargs = {}
         kwargs_is_list = {}
         other_kwargs = {}
@@ -310,7 +310,8 @@ class LLMTrain(BaseUI):
         if 'dataset' not in kwargs and 'custom_train_dataset_path' not in kwargs:
             raise gr.Error(cls.locale('dataset_alert', cls.lang)['value'])
 
-        sft_args = SftArguments(
+        arg_class = RLHFArguments if kwargs.get('')
+        sft_args = RLHFArguments(
             **{
                 key: value.split(' ') if kwargs_is_list.get(key, False) and isinstance(value, str) else value
                 for key, value in kwargs.items()
