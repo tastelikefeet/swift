@@ -62,6 +62,7 @@ def llm_sft(args: SftArguments) -> Dict[str, Union[str, Any]]:
         elif not use_torchacc():
             model_kwargs['device_map'] = 'auto'
 
+    model_kwargs = {}
     if args.quant_method == 'hqq':
         from transformers import HqqConfig
         if args.hqq_dynamic_config_path is not None:
