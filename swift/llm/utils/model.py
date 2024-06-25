@@ -132,6 +132,9 @@ class ModelType:
     qwen2_57b_a14b_instruct = 'qwen2-57b-a14b-instruct'
     qwen2_57b_a14b_instruct_int4 = 'qwen2-57b-a14b-instruct-int4'
 
+    # llava-qwen2
+    llava_qwen2 = 'llava-qwen2'
+
     # qwen-vl
     qwen_vl = 'qwen-vl'
     qwen_vl_chat = 'qwen-vl-chat'
@@ -947,6 +950,35 @@ def get_model_tokenizer_cogvlm2(*args, **kwargs):
         device = next(model.model.vision.linear_proj.parameters()).device
         model.model.vision.boi.data = model.model.vision.boi.to(device)
         model.model.vision.eoi.data = model.model.vision.eoi.to(device)
+    return model, tokenizer
+
+
+@register_model(
+    ModelType.llava_qwen2,
+    '/mnt/workspace/yzhao/llava-qwen2',
+    LoRATM.llama,
+    TemplateType.llava_qwen2_instruct,
+    support_flash_attn=True,
+    requires=['transformers>=4.36'],
+    tags=['multi-modal', 'vision'])
+def get_model_tokenizer_llava_llama(model_dir: str,
+                                    torch_dtype: Dtype,
+                                    model_kwargs: Dict[str, Any],
+                                    load_model: bool = True,
+                                    **kwargs):
+    from transformers import LlavaForConditionalGeneration, LlavaConfig, AutoProcessor
+
+    model_config = LlavaConfig.from_pretrained(model_dir)
+    processor = AutoProcessor.from_pretrained(model_dir)
+    model, tokenizer = get_model_tokenizer_with_flash_attn(
+        model_dir,
+        torch_dtype,
+        model_kwargs,
+        load_model,
+        model_config=model_config,
+        automodel_class=LlavaForConditionalGeneration,
+        **kwargs)
+    tokenizer.processor = processor
     return model, tokenizer
 
 
