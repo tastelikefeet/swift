@@ -640,14 +640,8 @@ class Template:
             res['input_ids'] = input_ids
         # multimodal
         pixel_values = [b['pixel_values'] for b in batch if b.get('pixel_values') is not None]
-        pixel_values_flatten = []
-        for p in pixel_values:
-            if isinstance(p, (list, tuple)):
-                pixel_values_flatten.extend(p)
-            else:
-                pixel_values_flatten.append(p)
-        if len(pixel_values_flatten) > 0:
-            res['pixel_values'] = torch.concat(pixel_values_flatten)
+        if len(pixel_values) > 0:
+            res['pixel_values'] = torch.concat(pixel_values)
 
         if loss_scale is not None:
             res['loss_scale'] = loss_scale
@@ -759,7 +753,7 @@ class LLavaQwen2Template(Template):
                 raw_image = _read_from_path(image_path)
                 pixel_value = self.tokenizer.processor.image_processor(raw_image, return_tensors='pt')['pixel_values']
                 pixel_values.append(pixel_value.to(self.model.dtype))
-            inputs['pixel_values'] = pixel_values
+            inputs['pixel_values'] = torch.cat(pixel_values)
         return inputs, {}
 
 
