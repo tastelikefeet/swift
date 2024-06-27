@@ -45,11 +45,10 @@ logger_format = logging.Formatter('[%(levelname)s:%(name)s] %(message)s')
 
 logger.handlers[0].setFormatter(logger_format)
 ms_logger.handlers[0].setFormatter(logger_format)
+log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
 if is_local_master():
-    logger.setLevel(logging.INFO)
-    ms_logger.setLevel(logging.INFO)
+    ms_logger.setLevel(log_level)
 else:
-    logger.setLevel(logging.ERROR)
     ms_logger.setLevel(logging.ERROR)
 
 os.environ['TOKENIZERS_PARALLELISM'] = 'true'
@@ -93,9 +92,6 @@ if not use_hf:
     def _msdataset_ddp_load(*args, **kwargs):
         with safe_ddp_context():
             dataset = _old_msdataset_load(*args, **kwargs)
-
-        if is_dist():  # sync
-            dist.barrier()
         return dataset
 
     # monkey patching
@@ -273,7 +269,10 @@ class LazyLLMDataset(Dataset):
         idx = np.random.permutation(len(self))[:self.try_fetch_time - 1]
         for i in [first_idx] + idx.tolist():
             data = self.dataset[i]
-            res = self.template.encode(data)
+            try:
+                res = self.template.encode(data)
+            except OSError:
+                continue
             if len(res[0]) > 0:
                 return res
 
@@ -426,6 +425,19 @@ def find_ln(model: Module) -> List[str]:
 
 def find_embedding(model: Module) -> List[str]:
     return _find_layers(model, torch.nn.Embedding)
+
+
+def is_quant_model(model_type: Optional[str] = None, model=None) -> bool:
+    # Check if the model is gptq, awq, aqlm model. Do not check for other quantization situations such as bnb.
+    if model_type is not None:
+        for k in ['int4', 'int8', 'awq', 'aqlm']:
+            if k in model_type:
+                return True
+    if model is not None:
+        for k in ['gptq', 'awq', 'aqlm']:
+            if getattr(model, f'is_{k}', None):
+                return True
+    return False
 
 
 def find_all_linears(model: Module, quantization_bit: int, model_type: str) -> List[str]:
@@ -738,7 +750,7 @@ def inference(model: PreTrainedModel,
     if generation_config is None:
         generation_config = getattr(model, 'generation_config', None)
     generation_config = deepcopy(generation_config)
-    if stream is True and verbose is False:
+    if stream and not verbose:
         logger.warning('Please set verbose to True to support TextStreamer, or use `inference_stream.`')
         stream = False
     streamer = None
