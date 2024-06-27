@@ -640,8 +640,14 @@ class Template:
             res['input_ids'] = input_ids
         # multimodal
         pixel_values = [b['pixel_values'] for b in batch if b.get('pixel_values') is not None]
-        if len(pixel_values) > 0:
-            res['pixel_values'] = torch.concat(pixel_values)
+        pixel_values_flatten = []
+        for p in pixel_values:
+            if isinstance(p, (list, tuple)):
+                pixel_values_flatten.extend(p)
+            else:
+                pixel_values_flatten.append(p)
+        if len(pixel_values_flatten) > 0:
+            res['pixel_values'] = torch.concat(pixel_values_flatten)
 
         if loss_scale is not None:
             res['loss_scale'] = loss_scale
@@ -743,7 +749,7 @@ class LLavaQwen2Template(Template):
                           ['<|im_start|>system\n{{SYSTEM}}<|im_end|>\n'])
 
     def replace_tag(self, media_type: Literal['image', 'video', 'audio'], index, example):
-        return [151646]
+        return [[151646]]
     
     def encode(self, example: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         inputs, _ = super().encode(example)
@@ -755,14 +761,6 @@ class LLavaQwen2Template(Template):
                 pixel_values.append(pixel_value.to(self.model.dtype))
             inputs['pixel_values'] = pixel_values
         return inputs, {}
-
-    def data_collator(self, batch: List[Dict[str, Any]], padding_to: Optional[int] = None) -> Dict[str, Any]:
-        res = super().data_collator(batch, padding_to)
-        pixel_values = [b['pixel_values'] for b in batch if 'pixel_values' in b]
-        pixel_values = [v for values in pixel_values for v in values]
-        if pixel_values:
-            res['pixel_values'] = torch.concat(pixel_values)
-        return res
 
 
 register_template(

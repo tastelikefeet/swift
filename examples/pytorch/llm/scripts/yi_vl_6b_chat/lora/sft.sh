@@ -1,6 +1,6 @@
 # Experimental environment: V100, A10, 3090
 # 18GB GPU memory
-NPROC_PER_NODE=4 \
+NPROC_PER_NODE=8 \
 swift sft \
     --model_type llava-qwen2 \
     --sft_type full \
@@ -24,4 +24,5 @@ swift sft \
     --save_total_limit 4 \
     --logging_steps 10 \
     --use_flash_attn true \
+    --deepspeed default-zero3 \
     --ddp_find_unused_parameters true
