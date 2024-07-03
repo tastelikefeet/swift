@@ -68,10 +68,10 @@ class AdamMini(Optimizer):
                 else:
                     param_group["weight_decay"] = weight_decay
 
-                if q_proj in name or k_proj in name:
+                if q_proj and (q_proj in name or k_proj in name):
                     param_group["parameter_per_head"] = self.n_embd * self.n_embd // self.n_head
 
-                if qkv_proj in name:
+                if qkv_proj and qkv_proj in name:
                     param_group["n_head"] = self.n_head
                     param_group["q_per_kv"] = self.n_head // self.n_query_groups
 
@@ -80,7 +80,7 @@ class AdamMini(Optimizer):
         defaults = dict(lr=lr, beta1=beta1, beta2=beta2, epsilon=epsilon)
         super(AdamMini, self).__init__(optim_groups, defaults)
 
-    def step(self):
+    def step(self, closure):
         with torch.no_grad():
             for group in self.param_groups:
                 beta1 = group["beta1"]
@@ -115,7 +115,7 @@ class AdamMini(Optimizer):
                         stepsize = lr / bias_correction_1
                         p.addcdiv_(state["m"], h, value=-stepsize)
 
-                    elif self.q_proj in name or self.k_proj in name:
+                    elif self.q_proj and (self.q_proj in name or self.k_proj in name) and 'lora' not in name and 'bias' not in name:
                         if p.grad is None:
                             continue
                         dim = group["parameter_per_head"]
@@ -158,7 +158,7 @@ class AdamMini(Optimizer):
                         update.mul_(lr)
                         p.add_(-update)
 
-                    elif self.qkv_proj in name:
+                    elif self.qkv_proj and self.qkv_proj in name:
                         if p.grad is None:
                             continue
                         if len(state) == 0:
