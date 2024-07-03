@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from types import MethodType
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-
+from swift.utils import get_dist_setting
 import json
 import numpy as np
 import safetensors
@@ -18,6 +18,7 @@ from packaging import version
 from peft import PeftModel
 from torch.nn import Module
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
+from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.data.data_collator import DataCollator
 from transformers.modeling_utils import unwrap_model
 from transformers.trainer import (ADAPTER_CONFIG_NAME, ADAPTER_SAFE_WEIGHTS_NAME, ADAPTER_WEIGHTS_NAME, CONFIG_NAME,
@@ -608,35 +609,55 @@ class SwiftMixin:
         opt_model = self.model
 
         if self.optimizer is None:
-            if version.parse(transformers.__version__) < version.parse('4.34.0'):
-                logger.warning(f'If you are using lora+, please remember using transformers>=4.34.0, '
-                               f'but now is {transformers.__version__}')
-                return super().create_optimizer()
+            if self.args.optim == 'adam_mini':
+                from swift.trainers.optimizers.adam_mini.adam_mini import AdamMini
+                num_key_value_heads = getattr(opt_model.config, 'num_key_value_heads',
+                                              opt_model.config.num_attention_heads)
+                _, _, world_size, _ = get_dist_setting()
+                model_type = self.sft_args.model_type or self.sft_args.model_id_or_path
+                from swift.tuners.module_mapping import MODEL_KEYS_MAPPING
+                for key in MODEL_KEYS_MAPPING.keys():
+                    if key in model_type.lower():
+                        model_type = key
+                        break
+                self.optimizer = AdamMini(model_type, opt_model, lr=self.args.learning_rate,
+                                     beta1=self.args.adam_beta1, beta2=self.args.adam_beta2,
+                                     epsilon=self.args.adam_epsilon,
+                                     n_embd=opt_model.config.hidden_size,
+                                     n_head=opt_model.config.num_attention_heads,
+                                     n_query_groups=opt_model.config.num_attention_heads//num_key_value_heads,
+                                     world_size=world_size,
+                                     model_sharding=is_deepspeed_zero3_enabled())
+            else:
+                if version.parse(transformers.__version__) < version.parse('4.34.0'):
+                    logger.warning(f'If you are using lora+, please remember using transformers>=4.34.0, '
+                                   f'but now is {transformers.__version__}')
+                    return super().create_optimizer()
 
-            optimizer_grouped_parameters = None
-            if hasattr(self.model, 'create_optimizer_param_groups'):
-                # Lora+ parameter groups
-                optimizer_grouped_parameters = self.model.create_optimizer_param_groups(
-                    lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
+                optimizer_grouped_parameters = None
+                if hasattr(self.model, 'create_optimizer_param_groups'):
+                    # Lora+ parameter groups
+                    optimizer_grouped_parameters = self.model.create_optimizer_param_groups(
+                        lr=self.args.learning_rate, weight_decay=self.args.weight_decay)
 
-            if optimizer_grouped_parameters is None:
-                # Default parameter groups
-                decay_parameters = self.get_decay_parameter_names(opt_model)
-                optimizer_grouped_parameters = [
-                    {
-                        'params':
-                        [p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad)],
-                        'weight_decay':
-                        self.args.weight_decay,
-                    },
-                    {
-                        'params':
-                        [p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad)],
-                        'weight_decay':
-                        0.0,
-                    },
-                ]
+                if optimizer_grouped_parameters is None:
+                    # Default parameter groups
+                    decay_parameters = self.get_decay_parameter_names(opt_model)
+                    optimizer_grouped_parameters = [
+                        {
+                            'params':
+                            [p for n, p in opt_model.named_parameters() if (n in decay_parameters and p.requires_grad)],
+                            'weight_decay':
+                            self.args.weight_decay,
+                        },
+                        {
+                            'params':
+                            [p for n, p in opt_model.named_parameters() if (n not in decay_parameters and p.requires_grad)],
+                            'weight_decay':
+                            0.0,
+                        },
+                    ]
 
-            optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
-            self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+                optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
+                self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
         return self.optimizer
