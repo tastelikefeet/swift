@@ -1,14 +1,17 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import os
 from functools import partial
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union, List
 
 import json
 import torch
+import transformers
 from datasets import Dataset as HfDataset
 from modelscope import BitsAndBytesConfig, GenerationConfig
-from transformers import IntervalStrategy
+from torch.nn import CrossEntropyLoss
+from transformers import IntervalStrategy, LlamaModel, Cache
 from transformers.integrations import is_deepspeed_zero3_enabled
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.utils import is_torch_npu_available
 
 from swift.torchacc_utils import patch_acc_model
@@ -103,6 +106,123 @@ def llm_sft_megatron(args: SftArguments) -> Dict[str, Any]:
         logger.info(f'images_dir: {images_dir}')
         plot_images(images_dir, args.logging_dir, ['train/loss'], 0.9)
     return {}
+
+
+class LlamaForCausalLM(transformers.LlamaForCausalLM):
+    _tied_weights_keys = ["lm_head.weight"]
+
+    def __init__(self, config):
+        super(transformers.LlamaForCausalLM, self).__init__(config)
+        self.model = LlamaModel(config)
+        self.hidden_model = LlamaModel(config)
+        self.hidden_head = torch.nn.Linear(config.hidden_size, 100 * config.hidden_size, bias=False)
+        self.vocab_size = config.vocab_size
+        self.lm_head = torch.nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def load_state_dict(self, state_dict: Dict[str, Any],
+                        strict: bool = True, assign: bool = False):
+        keys = [key for key in state_dict]
+        for key in keys:
+            if key.startswith('model'):
+                new_key = 'hidden_model' + key[len('model'):]
+                if new_key not in keys:
+                    state_dict[new_key] = state_dict[key]
+        return super().load_state_dict(state_dict, strict, assign)
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.hidden_model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
+        )
+        hidden_labels = self.lm_head(outputs[0])
+        hidden_labels = hidden_labels.view(100, -1)
+        indices = torch.where(input_ids == -100)[0]
+        first = self.model.embed_tokens(input_ids[:indices[0].item()])
+        last = self.model.embed_tokens(input_ids[:indices[-1].item()])
+        inputs_embeds = torch.cat(first, hidden_labels, last)
+
+        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+        outputs = self.model(
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
+        )
+
+        hidden_states = outputs[0]
+        if self.config.pretraining_tp > 1:
+            lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
+            logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
+            logits = torch.cat(logits, dim=-1)
+        else:
+            logits = self.lm_head(hidden_states)
+        logits = logits.float()
+
+        loss = None
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.config.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            # Enable model parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
+transformers.LlamaForCausalLM = LlamaForCausalLM
+transformers.models.LlamaForCausalLM = LlamaForCausalLM
+transformers.models.llama.LlamaForCausalLM = LlamaForCausalLM
+transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
 
 
 def llm_sft(args: SftArguments) -> Dict[str, Any]:
