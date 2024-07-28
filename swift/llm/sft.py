@@ -118,19 +118,10 @@ class LlamaForCausalLM(transformers.LlamaForCausalLM):
         self.hidden_head = torch.nn.Linear(config.hidden_size, 100 * config.hidden_size, bias=False)
         self.vocab_size = config.vocab_size
         self.lm_head = torch.nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.hidden_model_initialized = False
 
         # Initialize weights and apply final processing
         self.post_init()
-
-    def load_state_dict(self, state_dict: Dict[str, Any],
-                        strict: bool = True, assign: bool = False):
-        keys = [key for key in state_dict]
-        for key in keys:
-            if key.startswith('model'):
-                new_key = 'hidden_model' + key[len('model'):]
-                if new_key not in keys:
-                    state_dict[new_key] = state_dict[key]
-        return super().load_state_dict(state_dict, strict, assign)
 
     def forward(
         self,
@@ -146,14 +137,20 @@ class LlamaForCausalLM(transformers.LlamaForCausalLM):
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
+        if self.training and not self.hidden_model_initialized:
+            state_dict = self.model.state_dict()
+            self.hidden_model.load_state_dict(state_dict)
+            self.hidden_model_initialized = True
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+        indices = torch.where(input_ids[0] == -100)[0]
+        first = input_ids[:,:indices[0].item()]
+        last = input_ids[:,indices[-1].item()+1:]
         outputs = self.hidden_model(
-            input_ids=input_ids,
+            input_ids=torch.cat((first, last), dim=-1),
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
@@ -164,12 +161,11 @@ class LlamaForCausalLM(transformers.LlamaForCausalLM):
             return_dict=return_dict,
             cache_position=cache_position,
         )
-        hidden_labels = self.lm_head(outputs[0])
-        hidden_labels = hidden_labels.view(100, -1)
-        indices = torch.where(input_ids == -100)[0]
-        first = self.model.embed_tokens(input_ids[:indices[0].item()])
-        last = self.model.embed_tokens(input_ids[:indices[-1].item()])
-        inputs_embeds = torch.cat(first, hidden_labels, last)
+        hidden_labels = self.hidden_head(outputs[0][:, -1])
+        hidden_labels = hidden_labels.view(1, 100, -1)
+        first = self.model.embed_tokens(first)
+        last = self.model.embed_tokens(last)
+        inputs_embeds = torch.cat((first, hidden_labels, last), dim=1)
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
