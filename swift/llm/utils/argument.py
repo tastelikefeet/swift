@@ -31,7 +31,7 @@ from .media import MediaTag
 from .model import (MODEL_MAPPING, dtype_mapping, get_additional_saved_files, get_default_lora_target_modules,
                     get_default_template_type)
 from .template import TEMPLATE_MAPPING
-from .utils import is_quant_model, is_vllm_available
+from .utils import is_lmdeploy_available, is_quant_model, is_vllm_available
 
 logger = get_logger()
 
@@ -298,6 +298,8 @@ class ArgumentsBase:
                 self.deepspeed = self.deepspeed_config_path
             if self.eval_strategy is not None:
                 self.evaluation_strategy = self.eval_strategy
+            if self.lora_dropout_p is not None:
+                self.lora_dropout = self.lora_dropout_p
 
     def handle_custom_dataset_info(self: Union['SftArguments', 'InferArguments']):
         if self.custom_dataset_info is None:
@@ -503,7 +505,7 @@ class ArgumentsBase:
                 continue
             if key in {
                     'dataset_test_ratio', 'system', 'quant_method', 'model_id_or_path', 'custom_register_path',
-                    'custom_dataset_info'
+                    'custom_dataset_info', 'dataset_seed'
             } and value is not None:
                 continue
             if key in {'template_type', 'dtype'} and value != 'AUTO':
@@ -553,7 +555,7 @@ class SftArguments(ArgumentsBase):
         default_factory=list, metadata={'help': f'dataset choices: {list(DATASET_MAPPING.keys())}'})
     val_dataset: List[str] = field(
         default_factory=list, metadata={'help': f'dataset choices: {list(DATASET_MAPPING.keys())}'})
-    dataset_seed: int = 42
+    dataset_seed: Optional[int] = None
     dataset_test_ratio: float = 0.01
     use_loss_scale: bool = False  # for agent
     loss_scale_config_path: str = 'DEFAULT'
@@ -562,10 +564,12 @@ class SftArguments(ArgumentsBase):
     max_length: int = 2048  # -1: no limit
     truncation_strategy: Literal['delete', 'truncation_left'] = 'delete'
     check_dataset_strategy: Literal['none', 'discard', 'error', 'warning'] = 'none'
+
     # Chinese name and English name
     model_name: List[str] = field(default_factory=lambda: [None, None], metadata={'help': "e.g. ['小黄', 'Xiao Huang']"})
     model_author: List[str] = field(
         default_factory=lambda: [None, None], metadata={'help': "e.g. ['魔搭', 'ModelScope']"})
+
     # note: bf16 and quantization have requirements for gpu architecture
     # awq, gptq, and aqlm need to be pre-quantized models,
     # while bnb, hqq, and eetq can be quantized during SFT using the original models.
@@ -577,12 +581,16 @@ class SftArguments(ArgumentsBase):
     bnb_4bit_quant_type: Literal['fp4', 'nf4'] = 'nf4'
     bnb_4bit_use_double_quant: bool = True
     bnb_4bit_quant_storage: Optional[str] = None
+
+    # multi-modal
+    rescale_image: int = -1
+
     # lora
     lora_target_modules: List[str] = field(default_factory=lambda: ['DEFAULT'])
     lora_target_regex: Optional[str] = None
     lora_rank: int = 8
     lora_alpha: int = 32
-    lora_dropout_p: float = 0.05
+    lora_dropout: float = 0.05
     lora_bias_trainable: Literal['none', 'all'] = 'none'
     # e.g. ['wte', 'ln_1', 'ln_2', 'ln_f', 'lm_head']
     lora_modules_to_save: List[str] = field(default_factory=list)
@@ -668,12 +676,12 @@ class SftArguments(ArgumentsBase):
     max_steps: int = -1
     optim: str = 'adamw_torch'
     adam_beta1: float = 0.9
-    adam_beta2: float = 0.999
+    adam_beta2: float = 0.95
     adam_epsilon: float = 1e-8
     learning_rate: Optional[float] = None
     weight_decay: float = 0.1
     gradient_accumulation_steps: Optional[int] = None
-    max_grad_norm: float = 0.5
+    max_grad_norm: float = 1
     predict_with_generate: bool = False
     lr_scheduler_type: str = 'cosine'
     lr_scheduler_kwargs: Optional[str] = None  # json
@@ -720,7 +728,7 @@ class SftArguments(ArgumentsBase):
     acc_strategy: Literal['token', 'sentence'] = 'token'
     save_on_each_node: bool = False
     evaluation_strategy: Literal['steps', 'epoch', 'no'] = 'steps'
-    save_strategy: Literal['steps', 'epoch', 'no', None] = None
+    save_strategy: Literal['steps', 'epoch', 'no'] = 'steps'
     save_safetensors: bool = True
     gpu_memory_fraction: Optional[float] = None
     include_num_input_tokens_seen: Optional[bool] = False
@@ -768,6 +776,7 @@ class SftArguments(ArgumentsBase):
     neftune_alpha: Optional[float] = None
     deepspeed_config_path: Optional[str] = None
     model_cache_dir: Optional[str] = None
+    lora_dropout_p: Optional[float] = None
 
     custom_train_dataset_path: List[str] = field(default_factory=list)
     custom_val_dataset_path: List[str] = field(default_factory=list)
@@ -790,10 +799,8 @@ class SftArguments(ArgumentsBase):
                 return default_lora_tm
             target_modules += default_lora_tm
         if 'EMBEDDING' in target_modules:
-            target_modules.remove('EMBEDDING')
             self.lora_use_embedding = True
         if 'ALL' in target_modules:
-            target_modules.remove('ALL')
             self.lora_use_all = True
         return target_modules
 
@@ -854,6 +861,8 @@ class SftArguments(ArgumentsBase):
             self.load_from_ckpt_dir(True)
             if self.sft_type == 'full' or self.train_backend == 'megatron':
                 self.model_id_or_path = self.resume_from_checkpoint
+        if self.dataset_seed is None:
+            self.dataset_seed = self.seed
         self.set_model_type()
         self.check_flash_attn()
         self.handle_generation_config()
@@ -942,8 +951,6 @@ class SftArguments(ArgumentsBase):
 
         if self.save_steps is None:
             self.save_steps = self.eval_steps
-        if self.save_strategy is None:
-            self.save_strategy = self.evaluation_strategy
 
         # compatibility
         if self.quantization_bit > 0 and self.quant_method is None:
@@ -1114,6 +1121,7 @@ class SftArguments(ArgumentsBase):
             fsdp=self.fsdp,
             fsdp_config=self.fsdp_config,
             dataloader_drop_last=self.dataloader_drop_last,
+            seed=self.seed,
             **kwargs)
 
         training_args.ddp_find_unused_parameters = self.ddp_find_unused_parameters
@@ -1152,11 +1160,12 @@ class InferArguments(ArgumentsBase):
     model_id_or_path: Optional[str] = None
     model_revision: Optional[str] = None
 
-    sft_type: Literal['lora', 'longlora', 'full', 'adalora', 'ia3', 'llamapro', 'vera', 'boft'] = 'lora'
+    sft_type: Literal['lora', 'full', 'longlora', 'adalora', 'ia3', 'llamapro', 'vera', 'boft'] = 'lora'
     template_type: str = field(
         default='AUTO', metadata={'help': f"template_type choices: {list(TEMPLATE_MAPPING.keys()) + ['AUTO']}"})
-    infer_backend: Literal['AUTO', 'vllm', 'pt'] = 'AUTO'
+    infer_backend: Literal['AUTO', 'vllm', 'pt', 'lmdeploy'] = 'AUTO'
     ckpt_dir: Optional[str] = field(default=None, metadata={'help': '/path/to/your/vx-xxx/checkpoint-xxx'})
+    result_dir: Optional[str] = field(default=None, metadata={'help': '/path/to/your/infer_result'})
     load_args_from_ckpt_dir: bool = True
     load_dataset_config: bool = False
     eval_human: Optional[bool] = None
@@ -1169,7 +1178,7 @@ class InferArguments(ArgumentsBase):
         default_factory=list, metadata={'help': f'dataset choices: {list(DATASET_MAPPING.keys())}'})
     val_dataset: List[str] = field(
         default_factory=list, metadata={'help': f'dataset choices: {list(DATASET_MAPPING.keys())}'})
-    dataset_seed: int = 42
+    dataset_seed: Optional[int] = None
     dataset_test_ratio: float = 0.01
     show_dataset_sample: int = 10
     save_result: bool = True
@@ -1234,6 +1243,12 @@ class InferArguments(ArgumentsBase):
     image_input_shape: Optional[str] = None
     image_feature_size: Optional[int] = None
 
+    # lmdeploy
+    tp: int = 1
+    cache_max_entry_count: float = 0.8
+    quant_policy: int = 0  # e.g. 4, 8
+    vision_batch_size: int = 1  # max_batch_size in VisionConfig
+
     # compatibility. (Deprecated)
     self_cognition_sample: int = 0
     train_dataset_sample: int = -1  # Used for splitting the validation set.
@@ -1262,6 +1277,8 @@ class InferArguments(ArgumentsBase):
             self.load_from_ckpt_dir()
         else:
             assert self.load_dataset_config is False, 'You need to first set `--load_args_from_ckpt_dir true`.'
+        if self.dataset_seed is None:
+            self.dataset_seed = self.seed
         self._handle_dataset_sample()
         self._register_self_cognition()
         self.handle_custom_register()
@@ -1312,6 +1329,7 @@ class InferArguments(ArgumentsBase):
     def handle_infer_backend(self):
         model_info = MODEL_MAPPING[self.model_type]
         support_vllm = model_info.get('support_vllm', False)
+        support_lmdeploy = model_info.get('support_lmdeploy', False)
         self.lora_request_list = None
         if self.infer_backend == 'AUTO':
             self.infer_backend = 'pt'
@@ -1321,14 +1339,26 @@ class InferArguments(ArgumentsBase):
                     self.infer_backend = 'vllm'
                 if self.vllm_enable_lora:
                     self.infer_backend = 'vllm'
+            if is_lmdeploy_available() and support_lmdeploy and self.is_multimodal:
+                if ((self.sft_type == 'full' or self.sft_type == 'lora' and self.merge_lora)
+                        and self.quantization_bit == 0):
+                    self.infer_backend = 'lmdeploy'
         if self.infer_backend == 'vllm':
             require_version('vllm')
-            assert self.quantization_bit == 0, 'VLLM does not support bnb.'
             if not support_vllm:
                 logger.warning(f'vllm not support `{self.model_type}`')
             if self.sft_type == 'lora' and not self.vllm_enable_lora:
-                assert self.merge_lora, ('To use VLLM, you need to provide the complete weight parameters. '
+                assert self.merge_lora, ('To use vLLM, you need to provide the complete weight parameters. '
                                          'Please set `--merge_lora true`.')
+        if self.infer_backend == 'lmdeploy':
+            require_version('lmdeploy')
+            assert self.quantization_bit == 0, 'lmdeploy does not support bnb.'
+            if not support_lmdeploy:
+                logger.warning(f'lmdeploy not support `{self.model_type}`')
+            if self.sft_type == 'lora':
+                assert self.merge_lora, ('To use LMDeploy, you need to provide the complete weight parameters. '
+                                         'Please set `--merge_lora true`.')
+
         if (self.infer_backend == 'vllm' and self.vllm_enable_lora
                 or self.infer_backend == 'pt' and isinstance(self, DeployArguments) and self.sft_type == 'lora'):
             assert self.ckpt_dir is not None
@@ -1340,6 +1370,8 @@ class InferArguments(ArgumentsBase):
             self.stream = False
             logger.info('Setting self.stream: False')
         self.infer_media_type = template_info.get('infer_media_type', 'none')
+        if self.infer_media_type == 'none' and self.is_multimodal:
+            self.infer_media_type = 'interleave'
         self.media_type = template_info.get('media_type', 'image')
         self.media_key = MediaTag.media_keys.get(self.media_type, 'images')
         if self.merge_device_map is None:
@@ -1449,6 +1481,7 @@ class ExportArguments(InferArguments):
     quant_seqlen: int = 2048
     quant_device_map: str = 'cpu'  # e.g. 'cpu', 'auto'
     quant_output_dir: Optional[str] = None
+    quant_batch_size: int = 1
 
     # push to ms hub
     push_to_hub: bool = False
@@ -1519,6 +1552,14 @@ class ExportArguments(InferArguments):
                 self.hf_output_dir = os.path.join(self.ckpt_dir, f'{self.model_type}-hf')
             self.hf_output_dir = self._check_path(self.hf_output_dir)
             logger.info(f'Setting args.hf_output_dir: {self.hf_output_dir}')
+
+
+@dataclass
+class PtArguments(SftArguments):
+    sft_type: Literal['lora', 'full', 'longlora', 'adalora', 'ia3', 'llamapro', 'vera', 'boft'] = 'full'
+    lora_target_modules: List[str] = field(default_factory=lambda: ['ALL'])
+    lazy_tokenize: Optional[bool] = True
+    eval_steps: int = 500
 
 
 @dataclass

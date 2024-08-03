@@ -3,8 +3,9 @@
 ## Table of Contents
 
 - [sft Parameters](#sft-parameters)
-- [dpo Parameters](#dpo-parameters)
-- [merge-lora infer Parameters](#merge-lora-infer-parameters)
+- [pt Parameters](#pt-parameters)
+- [rlhf Parameters](#rlhf-parameters)
+- [infer merge-lora Parameters](#infer-merge-lora-parameters)
 - [export Parameters](#export-parameters)
 - [eval Parameters](#eval-parameters)
 - [app-ui Parameters](#app-ui-parameters)
@@ -38,7 +39,7 @@
   - Support for dataset_id. For example, 'AI-ModelScope/alpaca-gpt4-data-zh#2000', 'HF::llm-wizard/alpaca-gpt4-data-zh#2000', 'hurner/alpaca-gpt4-data-zh#2000', 'HF::shibing624/alpaca-zh#2000'. If the dataset_id has been registered, it will use the preprocessing function, subsets, split, etc. specified during registration. Otherwise, it will use `SmartPreprocessor`, support 5 dataset formats, and use 'default' subsets, with split set to 'train'. The supported dataset formats can be found in the [Customizing and Extending Datasets document](Customization.md#custom-dataset).
   - Support for dataset_path. For example, '1.jsonl#5000' (if it is a relative path, it is relative to the running directory).
 - `--val_dataset`: Specify separate validation datasets with the same format of the `dataset` argument, default is `[]`. If using `val_dataset`, the `dataset_test_ratio` will be ignored.
-- `--dataset_seed`: Seed for dataset processing, default is `42`. Exists as random_state, does not affect global seed.
+- `--dataset_seed`: The seed used to specify the dataset processing is set by default to `None`, meaning it is designated as the global `seed`. The `dataset_seed` exists in the form of `random_state` and does not affect the global seed.
 - `--dataset_test_ratio`: Used to specify the ratio for splitting the sub-dataset into training and validation sets. The default value is `0.01`. If `--val_dataset` is set, this parameter becomes ineffective.
 - `--train_dataset_sample`: The number of samples for the training dataset, default is `-1`, which means using the complete training dataset for training. This parameter is deprecated, please use `--dataset {dataset_name}#{dataset_sample}` instead.
 - `--val_dataset_sample`: Used to sample the validation set, with a default value of `None`, which automatically selects a suitable number of data samples for validation. If you specify `-1`, the complete validation set is used for validation. This parameter is deprecated and the number of samples in the validation set is controlled by `--dataset_test_ratio` or `--val_dataset {dataset_name}#{dataset_sample}`.
@@ -66,7 +67,7 @@
 - `--lora_target_regex`: The lora target regex in `Optional[str]`. default is `None`. If this argument is specified, the `lora_target_modules` will have no effect.
 - `--lora_rank`: Default is `8`. Only takes effect when `sft_type` is 'lora'.
 - `--lora_alpha`: Default is `32`. Only takes effect when `sft_type` is 'lora'.
-- `--lora_dropout_p`: Default is `0.05`, only takes effect when `sft_type` is 'lora'.
+- `--lora_dropout`: Default is `0.05`, only takes effect when `sft_type` is 'lora'.
 - `--init_lora_weights`: Method to initialize LoRA weights, can be specified as `true`, `false`, `gaussian`, `pissa`, or `pissa_niter_[number of iters]`. Default value `true`.
 - `--lora_bias_trainable`: Default is `'none'`, options: 'none', 'all'. Set to `'all'` to make all biases trainable.
 - `--lora_modules_to_save`: Default is `[]`. If you want to train embedding, lm_head, or layer_norm, you can set this parameter, e.g. `--lora_modules_to_save EMBEDDING LN lm_head`. If passed `'EMBEDDING'`, Embedding layer will be added to `lora_modules_to_save`. If passed `'LN'`, `RMSNorm` and `LayerNorm` will be added to `lora_modules_to_save`.
@@ -83,12 +84,12 @@
 - `--max_steps`: Max_steps for training, default is `-1`. If `max_steps >= 0`, this overrides `num_train_epochs`.
 - `--optim`: Default is `'adamw_torch'`.
 - `--adam_beta1`: Default is `0.9`.
-- `--adam_beta2`: Default is `0.999`.
+- `--adam_beta2`: Default is `0.95`.
 - `--adam_epsilon`: Default is `1e-8`.
 - `--learning_rate`: Default is `None`, i.e. set to 1e-4 if `sft_type` is lora, set to 1e-5 if `sft_type` is full.
 - `--weight_decay`: Default is `0.01`.
 - `--gradient_accumulation_steps`: Gradient accumulation, default is `None`, set to `math.ceil(16 / self.batch_size / world_size)`. `total_batch_size =  batch_size * gradient_accumulation_steps * world_size`.
-- `--max_grad_norm`: Gradient clipping, default is `0.5`.
+- `--max_grad_norm`: Gradient clipping, default is `1`.
 - `--predict_with_generate`: Whether to use generation for evaluation, default is `False`. If set to False, evaluate using `loss`. If set to True, evaluate using `ROUGE-L` and other metrics. Generative evaluation takes a long time, choose carefully.
 - `--lr_scheduler_type`: Default is `'cosine'`, options: 'linear', 'cosine', 'constant', etc.
 - `--warmup_ratio`: Proportion of warmup in total training steps, default is `0.05`.
@@ -237,6 +238,15 @@ The following parameters take effect when `sft_type` is set to `ia3`.
 - `--ia3_feedforward_modules`: Specify the Linear name of IA3's MLP, this name must be in `ia3_target_modules`.
 - `--ia3_modules_to_save`: Additional modules participating in IA3 training. See meaning of `lora_modules_to_save`.
 
+## PT Parameters
+
+PT parameters inherit from the SFT parameters with some modifications to the default values:
+
+- `--sft_type`: Default value is `'full'`.
+- `--lora_target_modules`: Default value is `'ALL'`.
+- `--lazy_tokenize`: Default value is `True`.
+- `--eval_steps`: Default value is `500`.
+
 ## RLHF Parameters
 RLHF parameters are an extension of the sft parameters, with the addition of the following options:
 - `--rlhf_type`: Choose the alignment algorithm, with options such as 'dpo', 'orpo', 'simpo', 'kto', 'cpo'. For training scripts with  different algorithms, please refer to [document](./Human-Preference-Alignment-Training-Documentation.md)
@@ -252,7 +262,7 @@ RLHF parameters are an extension of the sft parameters, with the addition of the
 - `--desirable_weight`: The loss weight for desirable responses $\lambda_D$ in the KTO algorithm, default is 1.0.
 - `--undesirable_weight`: The loss weight for undesirable responses $\lambda_U$ in the KTO paper, default is 1.0. Let $n_d$ and $n_u$ represent the number of desirable and undesirable examples in the dataset, respectively. The paper recommends controlling $\frac{\lambda_D n_D}{\lambda_Un_U} \in [1,\frac{4}{3}]$.
 
-## merge-lora infer Parameters
+## infer merge-lora Parameters
 
 - `--model_type`: Default is `None`, see `sft.sh command line arguments` for parameter details.
 - `--model_id_or_path`: Default is `None`, see `sft.sh command line arguments` for parameter details. Recommended to use model_type to specify.
@@ -270,7 +280,7 @@ RLHF parameters are an extension of the sft parameters, with the addition of the
 - `--dtype`: Default is `'AUTO`, see `sft.sh command line arguments` for parameter details.
 - `--dataset`: Default is `[]`, see `sft.sh command line arguments` for parameter details.
 - `--val_dataset`: Default is `[]`, see `sft.sh command line arguments` for parameter details.
-- `--dataset_seed`: Default is `42`, see `sft.sh command line arguments` for parameter details.
+- `--dataset_seed`: Default is `None`, see `sft.sh command line arguments` for parameter details.
 `--dataset_test_ratio`: Default value is `0.01`. For specific parameter details, refer to the `sft.sh command line arguments`.
 - `--show_dataset_sample`: Represents number of validation set samples to evaluate and display, default is `10`.
 - `--system`: Default is `None`. See `sft.sh command line arguments` for parameter details.
@@ -303,18 +313,29 @@ RLHF parameters are an extension of the sft parameters, with the addition of the
 - `--save_safetensors`: Whether to save as `safetensors` file or `bin` file. Default is `True`.
 - `--overwrite_generation_config`: Whether to save the generation_config used for evaluation as `generation_config.json` file, default is `None`. If `ckpt_dir` is specified, set to `True`, otherwise set to `False`. The generation_config file saved during training will be overwritten.
 - `--verbose`: If set to False, use tqdm style inference. If set to True, output inference query, response, label. Default is `None`, for auto selection, i.e. when `len(val_dataset) >= 100`, set to False, otherwise set to True. This parameter only takes effect when using dataset evaluation.
-- `--gpu_memory_utilization`: Parameter for initializing vllm engine `EngineArgs`, default is `0.9`. This parameter only takes effect when using vllm. VLLM inference acceleration and deployment can be found in [VLLM Inference Acceleration and Deployment](VLLM-inference-acceleration-and-deployment.md).
-- `--tensor_parallel_size`: Parameter for initializing vllm engine `EngineArgs`, default is `1`. This parameter only takes effect when using vllm.
-- `--max_model_len`: Override model's max_model__len, default is `None`. This parameter only takes effect when using vllm.
-- `--disable_custom_all_reduce`: Whether to disable the custom all-reduce kernel and fallback to NCCL. The default is `True`, which is different from the default value of vLLM.
-- `--enforce_eager`: vllm uses the PyTorch eager mode or builds the CUDA graph. Default is `False`. Setting to True can save memory, but it may affect efficiency.
-- `--vllm_enable_lora`: Default `False`. Whether to support vllm with lora.
-- `--vllm_max_lora_rank`: Default `16`.  Lora rank in VLLM.
 - `--lora_modules`: Default`[]`, the input format is `'{lora_name}={lora_path}'`, e.g. `--lora_modules lora_name1=lora_path1 lora_name2=lora_path2`. `ckpt_dir` will be added with `f'default-lora={args.ckpt_dir}'` by default.
 - `--custom_register_path`: Default is `None`. Pass in a `.py` file used to register templates, models, and datasets.
 - `--custom_dataset_info`: Default is `None`. Pass in the path to an external `dataset_info.json`, a JSON string, or a dictionary. Used for expanding datasets.
 - `--rope_scaling`: Default `None`, Support `linear` and `dynamic` to scale positional embeddings. Use when `max_length` exceeds `max_position_embeddings`.
 
+
+### vLLM Parameters
+
+- `--gpu_memory_utilization`: Parameter for initializing vllm engine `EngineArgs`, default is `0.9`. This parameter only takes effect when using vllm. vLLM inference acceleration and deployment can be found in [vLLM Inference Acceleration and Deployment](VLLM-inference-acceleration-and-deployment.md).
+- `--tensor_parallel_size`: Parameter for initializing vllm engine `EngineArgs`, default is `1`. This parameter only takes effect when using vllm.
+- `--max_model_len`: Override model's max_model__len, default is `None`. This parameter only takes effect when using vllm.
+- `--disable_custom_all_reduce`: Whether to disable the custom all-reduce kernel and fallback to NCCL. The default is `True`, which is different from the default value of vLLM.
+- `--enforce_eager`: vllm uses the PyTorch eager mode or builds the CUDA graph. Default is `False`. Setting to True can save memory, but it may affect efficiency.
+- `--vllm_enable_lora`: Default `False`. Whether to support vllm with lora.
+- `--vllm_max_lora_rank`: Default `16`.  Lora rank in vLLM.
+- `--lora_modules`: Introduced.
+
+
+### lmdeploy Parameters
+- `--tp`: Tensor parallelism, a parameter for initializing the lmdeploy engine, default value is `1`.
+- `--cache_max_entry_count`: Parameter to initialize the lmdeploy engine, default value is `0.8`.
+- `--quant_policy`: Quantization of Key-Value Cache, parameters for initializing the lmdeploy engine, default value is `0`, you can set it to 4 or 8.
+- `--vision_batch_size`: Parameter to initialize the lmdeploy engine, default value is `1`. This parameter is effective only when using multimodal models.
 
 ## export Parameters
 
@@ -326,6 +347,7 @@ export parameters inherit from infer parameters, with the following added parame
 - `--dataset`: This parameter is already defined in InferArguments, for export it means quantization dataset. Default is `[]`. More details: including how to customize quantization dataset, can be found in [LLM Quantization Documentation](LLM-quantization.md).
 - `--quant_n_samples`: Quantization parameter, default is `256`. When set to `--quant_method awq`, if OOM occurs during quantization, you can moderately reduce `--quant_n_samples` and `--quant_seqlen`. `--quant_method gptq` generally does not encounter quantization OOM.
 - `--quant_seqlen`: Quantization parameter, default is `2048`.
+- `--quant_batch_size`: Calibrating batch_size，Default `1`.
 - `--quant_device_map`: Default is `'cpu'`, to save memory. You can specify 'cuda:0', 'auto', 'cpu', etc., representing the device to load model during quantization. This parameter is independent of the actual device that performs the quantization, such as AWQ and GPTQ which will carry out quantization on cuda:0.
 - `quant_output_dir`: Default is `None`, the default quant_output_dir will be printed in the command line.
 - `--push_to_hub`: Default is `False`. Whether to push the final `ckpt_dir` to ModelScope Hub. If you specify `merge_lora`, full parameters will be pushed; if you also specify `quant_bits`, quantized model will be pushed.
@@ -371,7 +393,7 @@ app-ui parameters inherit from infer parameters, with the following added parame
 
 deploy parameters inherit from infer parameters, with the following added parameters:
 
-- `--host`: Default is `'127.0.0.1`.
+- `--host`: Default is `'127.0.0.1`. To make it accessible on the local network, you can set it to '0.0.0.0'.
 - `--port`: Default is `8000`.
 - `--api_key`: The default is `None`, meaning that the request will not be subjected to api_key verification.
 - `--ssl_keyfile`: Default is `None`.
@@ -379,7 +401,7 @@ deploy parameters inherit from infer parameters, with the following added parame
 
 ## web-ui Parameters
 
-- `--host`: Default `'127.0.0.1'`.
+- `--host`: Default `'127.0.0.1'`. To make it accessible on the local network, you can set it to '0.0.0.0'.
 - `--port`: Default `None`.
 - `--lang`: Default `'zh'`.
 - `--share`: Default `False`.

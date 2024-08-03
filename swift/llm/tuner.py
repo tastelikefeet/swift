@@ -12,8 +12,8 @@ from swift.trainers import TrainerCallback
 from swift.tuners import (AdaLoraConfig, AdapterConfig, BOFTConfig, IA3Config, LongLoRAModelType, LoraConfig,
                           LoRAConfig, NEFTuneConfig, Swift, VeraConfig)
 from swift.tuners.llamapro import LLaMAProConfig
-from swift.tuners.module_mapping import MODEL_KEYS_MAPPING
 from swift.utils import activate_model_parameters, freeze_model_parameters, get_logger, use_torchacc
+from swift.utils.module_mapping import MODEL_KEYS_MAPPING
 from .utils import SftArguments, find_all_linears, find_embedding, find_ln, is_adapter
 
 logger = get_logger()
@@ -31,8 +31,10 @@ def handle_target_modules(model, args: SftArguments) -> None:
     else:
         target_modules = args.lora_target_modules
     if args.lora_use_embedding:
+        target_modules.remove('EMBEDDING')
         target_modules += find_embedding(model)
     if args.lora_use_all:
+        target_modules.remove('ALL')
         target_modules += find_all_linears(model, args.quantization_bit, args.model_type, args.quant_method)
     if args.sft_type == 'ia3':
         args.ia3_target_modules = target_modules
@@ -110,7 +112,7 @@ def prepare_model(model, args: SftArguments):
                 'r': args.lora_rank,
                 'target_modules': args.lora_target_regex or args.lora_target_modules,
                 'lora_alpha': args.lora_alpha,
-                'lora_dropout': args.lora_dropout_p,
+                'lora_dropout': args.lora_dropout,
                 'bias': args.lora_bias_trainable,
                 'modules_to_save': args.lora_modules_to_save,
                 'use_rslora': args.use_rslora,
@@ -119,6 +121,9 @@ def prepare_model(model, args: SftArguments):
                 'init_lora_weights': args.init_lora_weights,
             }
             if args.sft_type in ('lora', 'longlora'):
+                # Fix the name of the layer in xcomposer that contains Plora.
+                if any(['lora_' in n for n, p in model.named_parameters()]):
+                    model.requires_grad_(False)
                 if args.lora_dtype == 'AUTO':
                     args.lora_dtype = None
                 if args.tuner_backend == 'swift':

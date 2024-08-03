@@ -22,8 +22,9 @@ from swift.utils import (append_to_jsonl, check_json_format, compute_acc_metrics
                          preprocess_logits_for_metrics, seed_everything, show_layers, use_torchacc)
 from .accelerator import ta_accelerate
 from .tuner import prepare_model
-from .utils import (LazyLLMDataset, SftArguments, Template, dataset_map, get_dataset, get_model_tokenizer, get_template,
-                    get_time_info, print_example, set_generation_config, sort_by_max_length, stat_dataset)
+from .utils import (TEMPLATE_MAPPING, LazyLLMDataset, PtArguments, SftArguments, Template, dataset_map, get_dataset,
+                    get_model_tokenizer, get_template, get_time_info, print_example, set_generation_config,
+                    sort_by_max_length, stat_dataset)
 
 logger = get_logger()
 
@@ -223,6 +224,14 @@ transformers.models.llama.modeling_llama.LlamaForCausalLM = LlamaForCausalLM
 
 def llm_sft(args: SftArguments) -> Dict[str, Any]:
     logger.info(f'args: {args}')
+    is_generation = TEMPLATE_MAPPING[args.template_type].get('is_generation', False)
+    if is_generation and type(args) is SftArguments:
+        logger.warning(f"Please check if args.template_type: '{args.template_type}' is correct. "
+                       'Currently, SFT is in progress, but the template is used for PT.')
+    elif not is_generation and type(args) is PtArguments:
+        logger.warning(f"Please check if args.template_type: '{args.template_type}' is correct. "
+                       'Currently, PT is in progress, but the template is used for SFT.')
+
     seed_everything(args.seed)
     if args.train_backend == 'megatron':
         return llm_sft_megatron(args)
@@ -384,6 +393,7 @@ def llm_sft(args: SftArguments) -> Dict[str, Any]:
     template_kwargs['tools_prompt'] = args.tools_prompt
     if args.sequence_parallel_size and args.sequence_parallel_size > 1:
         template_kwargs['sequence_parallel_size'] = args.sequence_parallel_size
+    template_kwargs['rescale_image'] = args.rescale_image
     template: Template = get_template(
         args.template_type,
         tokenizer,
@@ -539,3 +549,4 @@ def get_sft_main(args, llm):
 
 
 sft_main = get_sft_main(SftArguments, llm_sft)
+pt_main = get_sft_main(PtArguments, llm_sft)
