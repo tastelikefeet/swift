@@ -22,7 +22,10 @@ class CPOTrainer(PushToMsHubMixin, SwiftMixin, HFCPOTrainer):
         self.streaming = kwargs.pop('streaming')
         is_vision = kwargs.pop('is_vision')
         self.keys = []  # keys appears in tokenize_row
-        self.column_names = list(next(iter(kwargs.get('train_dataset'))).keys())
+        if self.streaming:
+            self.column_names = list(next(iter(kwargs.get('train_dataset'))).keys())
+        else:
+            self.column_names = kwargs.get('train_dataset')[0].features.keys()
         self.need_filter: bool = False
         super().__init__(*args, **kwargs)
         self.train_dataset = self.train_dataset.remove_columns(self.column_names)

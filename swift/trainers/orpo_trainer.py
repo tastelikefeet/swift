@@ -21,7 +21,10 @@ class ORPOTrainer(PushToMsHubMixin, SwiftMixin, HFORPOTrainer):
         self.streaming = kwargs.pop('streaming')
         is_vision = kwargs.pop('is_vision')
         self.keys = []
-        self.column_names = list(next(iter(kwargs.get('train_dataset'))).keys())
+        if self.streaming:
+            self.column_names = list(next(iter(kwargs.get('train_dataset'))).keys())
+        else:
+            self.column_names = kwargs.get('train_dataset')[0].features.keys()
         self.need_filter: bool = False
 
         super().__init__(*args, **kwargs)
