@@ -24,7 +24,7 @@ config_mapping = {
 @dataclass
 class ExtraMegatronArguments:
     padded_vocab_size: Optional[int] = None
-    model_series: Optional[str] = None
+    model_type: Optional[str] = None
 
     target_tensor_model_parallel_size: int = 1
     target_pipeline_model_parallel_size: int = 1
@@ -86,14 +86,12 @@ class MegatronMixin:
     tensor_model_parallel_size: int = 1
     pipeline_model_parallel_size: int = 1
     seed: int = 42
-    transformer_impl: str = 'transformer_engine'
     sequence_parallel: bool = False
 
     apply_query_key_layer_scaling: bool = False  # fp16
     num_workers: int = 4
 
     log_timers_to_tensorboard: bool = True
-    log_batch_size_to_tensorboard: bool = True
     log_validation_ppl_to_tensorboard: bool = True
     log_memory_to_tensorboard: bool = True
     tensorboard_log_interval: int = 1

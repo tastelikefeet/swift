@@ -13,6 +13,7 @@ import torch
 import torch.distributed as dist
 import transformers
 from datasets import Dataset as HfDataset
+from datasets import IterableDataset as HfIterableDataset
 from datasets import concatenate_datasets
 from packaging import version
 from torch import dtype as Dtype
@@ -34,10 +35,11 @@ from .template import TEMPLATE_MAPPING
 from .utils import is_lmdeploy_available, is_quant_model, is_vllm_available
 
 logger = get_logger()
+DATASET_TYPE = Union[HfDataset, HfIterableDataset]
 
 
 def is_adapter(sft_type: str) -> bool:
-    return sft_type in {'lora', 'longlora', 'adalora', 'ia3', 'llamapro', 'adapter', 'vera', 'boft'}
+    return sft_type in {'lora', 'longlora', 'adalora', 'ia3', 'llamapro', 'adapter', 'vera', 'boft', 'fourierft'}
 
 
 class ArgumentsBase:
@@ -301,6 +303,28 @@ class ArgumentsBase:
             if self.lora_dropout_p is not None:
                 self.lora_dropout = self.lora_dropout_p
 
+            if self.boft_target_modules:
+                self.target_modules = self.boft_target_modules
+            if self.boft_modules_to_save:
+                self.modules_to_save = self.boft_modules_to_save
+
+            if self.ia3_target_modules:
+                self.target_modules = self.ia3_target_modules
+            if self.ia3_modules_to_save:
+                self.modules_to_save = self.ia3_modules_to_save
+
+            if self.vera_target_modules:
+                self.target_modules = self.vera_target_modules
+            if self.vera_modules_to_save:
+                self.modules_to_save = self.vera_modules_to_save
+
+            if self.lora_target_modules:
+                self.target_modules = self.lora_target_modules
+            if self.lora_modules_to_save:
+                self.modules_to_save = self.lora_modules_to_save
+            if self.lora_target_regex:
+                self.target_regex = self.lora_target_regex
+
     def handle_custom_dataset_info(self: Union['SftArguments', 'InferArguments']):
         if self.custom_dataset_info is None:
             return
@@ -352,11 +376,14 @@ class ArgumentsBase:
                                      'Representing the model name and model author in Chinese and English.')
                 setattr(self, k, v)
 
-    def _handle_dataset_compat(self: Union['SftArguments', 'InferArguments'], train_dataset: Optional[HfDataset],
-                               val_dataset: Optional[HfDataset]) -> Tuple[Optional[HfDataset], Optional[HfDataset]]:
+    def _handle_dataset_compat(
+            self: Union['SftArguments', 'InferArguments'], train_dataset: Optional[DATASET_TYPE],
+            val_dataset: Optional[DATASET_TYPE]) -> Tuple[Optional[DATASET_TYPE], Optional[DATASET_TYPE]]:
         # compatibility. (Deprecated)
+        streaming = getattr(self, 'streaming', False)
         random_state = np.random.RandomState(self.dataset_seed)
         val_dataset_sample = self.val_dataset_sample
+
         if train_dataset is not None and self.train_dataset_sample >= 0:
             train_dataset_sample = min(self.train_dataset_sample, train_dataset.shape[0])
             if train_dataset.shape[0] > train_dataset_sample:
@@ -366,10 +393,13 @@ class ArgumentsBase:
             if val_dataset_sample is None:
                 val_dataset_sample = max(int(train_dataset_sample * self.dataset_test_ratio), 1)
         if val_dataset is not None and val_dataset_sample is not None and val_dataset_sample >= 0:
-            if val_dataset.shape[0] > val_dataset_sample:
+            if not streaming and val_dataset.shape[0] > val_dataset_sample:
                 logger.info(f'val_dataset_sample: {val_dataset_sample}')
                 val_idxs = random_state.permutation(val_dataset_sample)
                 val_dataset = val_dataset.select(val_idxs)
+            elif streaming:
+                val_dataset = val_dataset.shuffle(
+                    seed=self.dataset_seed, buffer_size=self.streaming_buffer_size).take(val_dataset_sample)
 
         if (train_dataset is None or not hasattr(self, 'train_dataset_mix_ratio') or self.train_dataset_mix_ratio <= 0
                 or len(self.train_dataset_mix_ds) == 0):
@@ -379,7 +409,11 @@ class ArgumentsBase:
         logger.info(f'train_dataset_mix_ds: {self.train_dataset_mix_ds}')
         logger.info(f'len(train_dataset): {len(train_dataset)}, mix_dataset_sample: {mix_dataset_sample}')
         mixed_dataset = get_dataset(
-            self.train_dataset_mix_ds, 0.0, random_state, check_dataset_strategy=self.check_dataset_strategy)[0]
+            self.train_dataset_mix_ds,
+            0.0,
+            random_state,
+            check_dataset_strategy=self.check_dataset_strategy,
+            streaming=streaming)[0]
         if len(mixed_dataset) < mix_dataset_sample:
             logger.warn(f'The length of dataset used for mixin: {self.train_dataset_mix_ds} are '
                         'lesser than the ratio required by the `train_dataset_mix_ratio` '
@@ -485,8 +519,11 @@ class ArgumentsBase:
         imported_keys = [
             'model_type', 'model_revision', 'template_type', 'dtype', 'quant_method', 'quantization_bit',
             'bnb_4bit_comp_dtype', 'bnb_4bit_quant_type', 'bnb_4bit_use_double_quant', 'model_id_or_path',
-            'custom_register_path', 'custom_dataset_info', 'tp', 'pp'
+            'custom_register_path', 'custom_dataset_info'
         ]
+        if (isinstance(self, SftArguments) and self.train_backend == 'megatron'
+                or isinstance(self, ExportArguments) and self.to_hf is True):
+            imported_keys += ['tp', 'pp']
         if not is_sft:
             imported_keys += ['sft_type', 'rope_scaling', 'system']
             if getattr(self, 'load_dataset_config', False) and from_sft_args:
@@ -525,7 +562,8 @@ class SftArguments(ArgumentsBase):
     model_id_or_path: Optional[str] = None
     model_revision: Optional[str] = None
 
-    sft_type: Literal['lora', 'full', 'longlora', 'adalora', 'ia3', 'llamapro', 'adapter', 'vera', 'boft'] = 'lora'
+    sft_type: Literal['lora', 'full', 'longlora', 'adalora', 'ia3', 'llamapro', 'adapter', 'vera', 'boft',
+                      'fourierft'] = 'lora'
     freeze_parameters: float = 0.  # 0 ~ 1
     additional_trainable_parameters: List[str] = field(default_factory=list)
     tuner_backend: Literal['swift', 'peft', 'unsloth'] = 'peft'
@@ -564,7 +602,10 @@ class SftArguments(ArgumentsBase):
     max_length: int = 2048  # -1: no limit
     truncation_strategy: Literal['delete', 'truncation_left'] = 'delete'
     check_dataset_strategy: Literal['none', 'discard', 'error', 'warning'] = 'none'
-
+    # streaming dataset
+    streaming: bool = False
+    streaming_val_size: int = 0
+    streaming_buffer_size: int = 16384
     # Chinese name and English name
     model_name: List[str] = field(default_factory=lambda: [None, None], metadata={'help': "e.g. ['小黄', 'Xiao Huang']"})
     model_author: List[str] = field(
@@ -585,21 +626,27 @@ class SftArguments(ArgumentsBase):
     # multi-modal
     rescale_image: int = -1
 
+    # tuners
+    target_modules: List[str] = field(default_factory=lambda: ['DEFAULT'])
+    target_regex: Optional[str] = None
+    # e.g. ['wte', 'ln_1', 'ln_2', 'ln_f', 'lm_head']
+    modules_to_save: List[str] = field(default_factory=list)
+
     # lora
-    lora_target_modules: List[str] = field(default_factory=lambda: ['DEFAULT'])
-    lora_target_regex: Optional[str] = None
     lora_rank: int = 8
     lora_alpha: int = 32
     lora_dropout: float = 0.05
     lora_bias_trainable: Literal['none', 'all'] = 'none'
-    # e.g. ['wte', 'ln_1', 'ln_2', 'ln_f', 'lm_head']
-    lora_modules_to_save: List[str] = field(default_factory=list)
     lora_dtype: Literal['fp16', 'bf16', 'fp32', 'AUTO'] = 'AUTO'
     lora_lr_ratio: float = None
     use_rslora: bool = False
     use_dora: bool = False
-    # Literal['gaussian', 'pissa', 'pissa_niter_[number of iters]', 'loftq', 'true', 'false']
+    # Literal['gaussian', 'pissa', 'pissa_niter_[number of iters]', 'olora', 'loftq', 'true', 'false']
     init_lora_weights: str = 'true'
+
+    # fourierft
+    fourier_n_frequency: int = 2000
+    fourier_scaling: float = 300.0
 
     # rope-scaling
     rope_scaling: Literal['linear', 'dynamic'] = None
@@ -608,17 +655,13 @@ class SftArguments(ArgumentsBase):
     boft_block_size: int = 4
     boft_block_num: int = 0
     boft_n_butterfly_factor: int = 1
-    boft_target_modules: List[str] = field(default_factory=lambda: ['DEFAULT'])
     boft_dropout: float = 0.0
-    boft_modules_to_save: List[str] = field(default_factory=list)
 
     # Vera
     vera_rank: int = 256
-    vera_target_modules: List[str] = field(default_factory=lambda: ['DEFAULT'])
     vera_projection_prng_key: int = 0
     vera_dropout: float = 0.0
     vera_d_initial: float = 0.1
-    vera_modules_to_save: List[str] = field(default_factory=list)
 
     # adapter
     adapter_act: str = 'gelu'
@@ -626,8 +669,8 @@ class SftArguments(ArgumentsBase):
 
     # galore
     use_galore: bool = False
-    galore_rank: int = 128
     galore_target_modules: Optional[List[str]] = None
+    galore_rank: int = 128
     galore_update_proj_gap: int = 50
     galore_scale: float = 1.0
     galore_proj_type: str = 'std'
@@ -650,10 +693,10 @@ class SftArguments(ArgumentsBase):
     adalora_beta1: float = 0.85
     adalora_beta2: float = 0.85
     adalora_orth_reg_weight: float = 0.5
+
     # ia3
-    ia3_target_modules: List[str] = field(default_factory=lambda: ['DEFAULT'])
     ia3_feedforward_modules: List[str] = field(default_factory=list)
-    ia3_modules_to_save: List[str] = field(default_factory=list)
+
     # llamapro
     llamapro_num_new_blocks: int = 4
     llamapro_num_groups: Optional[int] = None
@@ -777,6 +820,15 @@ class SftArguments(ArgumentsBase):
     deepspeed_config_path: Optional[str] = None
     model_cache_dir: Optional[str] = None
     lora_dropout_p: Optional[float] = None
+    lora_target_modules: List[str] = field(default_factory=list)
+    lora_target_regex: Optional[str] = None
+    lora_modules_to_save: List[str] = field(default_factory=list)
+    boft_target_modules: List[str] = field(default_factory=list)
+    boft_modules_to_save: List[str] = field(default_factory=list)
+    vera_target_modules: List[str] = field(default_factory=list)
+    vera_modules_to_save: List[str] = field(default_factory=list)
+    ia3_target_modules: List[str] = field(default_factory=list)
+    ia3_modules_to_save: List[str] = field(default_factory=list)
 
     custom_train_dataset_path: List[str] = field(default_factory=list)
     custom_val_dataset_path: List[str] = field(default_factory=list)
@@ -861,6 +913,10 @@ class SftArguments(ArgumentsBase):
             self.load_from_ckpt_dir(True)
             if self.sft_type == 'full' or self.train_backend == 'megatron':
                 self.model_id_or_path = self.resume_from_checkpoint
+
+        if self.rope_scaling:
+            logger.info(f'rope_scaling is set to {self.rope_scaling}, please remember to set max_length')
+
         if self.dataset_seed is None:
             self.dataset_seed = self.seed
         self.set_model_type()
@@ -874,19 +930,8 @@ class SftArguments(ArgumentsBase):
         self.lora_use_all = False
         self.lora_m2s_use_embedding = False
         self.lora_m2s_use_ln = False
-        if self.sft_type == 'ia3':
-            self.ia3_feedforward_modules = self._prepare_target_modules(self.ia3_feedforward_modules)
-            self.ia3_target_modules = self._prepare_target_modules(self.ia3_target_modules)
-            self.ia3_modules_to_save = self._prepare_modules_to_save(self.ia3_modules_to_save)
-        elif self.sft_type == 'vera':
-            self.vera_target_modules = self._prepare_target_modules(self.vera_target_modules)
-            self.vera_modules_to_save = self._prepare_modules_to_save(self.vera_modules_to_save)
-        elif self.sft_type == 'boft':
-            self.boft_target_modules = self._prepare_target_modules(self.boft_target_modules)
-            self.boft_modules_to_save = self._prepare_modules_to_save(self.boft_modules_to_save)
-        else:
-            self.lora_target_modules = self._prepare_target_modules(self.lora_target_modules)
-            self.lora_modules_to_save = self._prepare_modules_to_save(self.lora_modules_to_save)
+        self.target_modules = self._prepare_target_modules(self.target_modules)
+        self.modules_to_save = self._prepare_modules_to_save(self.modules_to_save)
         if self.use_self_cognition and self.sft_type == 'lora' and not self.lora_use_all:
             logger.warning('Due to knowledge editing involved, it is recommended to add LoRA on MLP. '
                            'For example: `--lora_target_modules ALL`. '
@@ -995,7 +1040,8 @@ class SftArguments(ArgumentsBase):
         if self.gradient_accumulation_steps is None:
             self.gradient_accumulation_steps = math.ceil(16 / self.batch_size / self.world_size)
         template_info = TEMPLATE_MAPPING[self.template_type]
-        if self.lazy_tokenize is None:
+        self._handle_streaming_args()
+        if self.lazy_tokenize is None and not self.streaming:
             self.lazy_tokenize = template_info.get('lazy_tokenize', False)
             logger.info(f'Setting args.lazy_tokenize: {self.lazy_tokenize}')
         if self.dataloader_num_workers is None:
@@ -1057,12 +1103,16 @@ class SftArguments(ArgumentsBase):
             kwargs['neftune_noise_alpha'] = self.neftune_noise_alpha
 
         parameters = inspect.signature(Seq2SeqTrainingArguments.__init__).parameters
-        if 'include_num_input_tokens_seen' in parameters:
-            kwargs['include_num_input_tokens_seen'] = self.include_num_input_tokens_seen
+        for k in ['lr_scheduler_kwargs', 'include_num_input_tokens_seen']:
+            if k in parameters:
+                kwargs[k] = getattr(self, k)
         if 'eval_strategy' in parameters:
             kwargs['eval_strategy'] = self.evaluation_strategy
         else:
             kwargs['evaluation_strategy'] = self.evaluation_strategy
+
+        if 'accelerator_config' in parameters:
+            kwargs['accelerator_config'] = {'dispatch_batches': False}
 
         training_args = Seq2SeqTrainingArguments(
             output_dir=self.output_dir,
@@ -1076,7 +1126,6 @@ class SftArguments(ArgumentsBase):
             num_train_epochs=self.num_train_epochs,
             max_steps=self.max_steps,
             lr_scheduler_type=self.lr_scheduler_type,
-            lr_scheduler_kwargs=self.lr_scheduler_kwargs,
             warmup_ratio=self.warmup_ratio,
             warmup_steps=self.warmup_steps,
             logging_steps=self.logging_steps,
@@ -1150,6 +1199,42 @@ class SftArguments(ArgumentsBase):
         if self.add_output_dir_suffix is None:
             self.add_output_dir_suffix = False
             logger.info(f'Setting args.add_output_dir_suffix: {self.add_output_dir_suffix}')
+
+    def _handle_streaming_args(self) -> None:
+        if not self.streaming:
+            return
+        if self.max_steps == -1:
+            raise ValueError('Please specify `max_steps` in streaming mode.')
+
+        if self.packing:
+            self.packing = False
+            logger.warning('Packing is not supported for streaming dataset, set to False')
+
+        if self.test_oom_error:
+            self.test_oom_error = False
+            logger.warning('test_oom_error is not supported for streaming dataset, set to False')
+
+        if self.lazy_tokenize:
+            self.lazy_tokenize = False
+            logger.info('lazy_tokenize set to False in streaming dataset')
+
+        if self.train_dataset_mix_ratio > 0:
+            logger.warning('train_dataset_mix_ratio is not supported for streaming dataset, set to 0')
+            self.train_dataset_mix_ratio = 0
+
+        if self.dataset_test_ratio > 0:
+            logger.info('Set dataset_test_ratio to 0 in streaming mode.'
+                        'You can manually set val_dataset and val_dataset_sample.'
+                        'or set streaming_val_size instead to split from train dataset')
+            self.dataset_test_ratio = 0
+
+        if self.train_dataset_sample > 0:
+            logger.warning('train_dataset_sample is not supported for streaming dataset, set to -1')
+            self.train_dataset_sample = -1
+
+        if self.dataloader_num_workers is None or self.dataloader_num_workers > 0:
+            logger.info('Set dataloader_num_workers to 0 in streaming mode')
+            self.dataloader_num_workers = 0
 
 
 @dataclass
@@ -1234,6 +1319,7 @@ class InferArguments(ArgumentsBase):
     # vllm
     gpu_memory_utilization: float = 0.9
     tensor_parallel_size: int = 1
+    max_num_seqs: int = 256
     max_model_len: Optional[int] = None
     disable_custom_all_reduce: bool = True  # Default values different from vllm
     enforce_eager: bool = False
@@ -1277,6 +1363,10 @@ class InferArguments(ArgumentsBase):
             self.load_from_ckpt_dir()
         else:
             assert self.load_dataset_config is False, 'You need to first set `--load_args_from_ckpt_dir true`.'
+
+        if self.rope_scaling:
+            logger.info(f'rope_scaling is set to {self.rope_scaling}, '
+                        f'please remember to set max_length, which is supposed to be the same as training')
         if self.dataset_seed is None:
             self.dataset_seed = self.seed
         self._handle_dataset_sample()
@@ -1409,6 +1499,8 @@ class DeployArguments(InferArguments):
     ssl_certfile: Optional[str] = None
 
     owned_by: str = 'swift'
+    verbose: bool = True  # Whether to log request_info
+    log_interval: int = 10  # Interval for printing global statistics
 
     def __post_init__(self):
         super().__post_init__()
@@ -1497,7 +1589,6 @@ class ExportArguments(InferArguments):
     hf_output_dir: Optional[str] = None
     tp: int = 1
     pp: int = 1
-    check_model_forward: bool = False
 
     # The parameter has been defined in InferArguments.
     # merge_lora, hub_token
@@ -1557,7 +1648,7 @@ class ExportArguments(InferArguments):
 @dataclass
 class PtArguments(SftArguments):
     sft_type: Literal['lora', 'full', 'longlora', 'adalora', 'ia3', 'llamapro', 'vera', 'boft'] = 'full'
-    lora_target_modules: List[str] = field(default_factory=lambda: ['ALL'])
+    target_modules: List[str] = field(default_factory=lambda: ['ALL'])
     lazy_tokenize: Optional[bool] = True
     eval_steps: int = 500
 

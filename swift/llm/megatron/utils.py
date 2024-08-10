@@ -1,8 +1,9 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import os
+import shutil
 import sys
 from functools import partial, wraps
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 import torch
 import torch.distributed as dist
@@ -15,7 +16,8 @@ logger = get_logger()
 
 def init_megatron_env() -> None:
     if 'MEGATRON_LM_PATH' not in os.environ:
-        megatron_path = git_clone_github('https://github.com/NVIDIA/Megatron-LM')
+        megatron_path = git_clone_github(
+            'https://github.com/NVIDIA/Megatron-LM', commit_hash='6dbe4cf699880038b1e5cd90b23ee71053c7f2ee')
         os.environ['MEGATRON_LM_PATH'] = megatron_path
     else:
         megatron_path = os.environ['MEGATRON_LM_PATH']
@@ -24,16 +26,20 @@ def init_megatron_env() -> None:
     sys.path.append(megatron_path)
 
     if 'PAI_MEGATRON_PATCH_PATH' not in os.environ:
-        megatron_patch_path = git_clone_github('https://github.com/alibaba/Pai-Megatron-Patch')
+        megatron_patch_path = git_clone_github(
+            'https://github.com/alibaba/Pai-Megatron-Patch', commit_hash='6fd5d050b240fd959f0ba69f1e9cd9a053e5a81d')
         os.environ['PAI_MEGATRON_PATCH_PATH'] = megatron_patch_path
     sys.path.append(os.environ['PAI_MEGATRON_PATCH_PATH'])
 
-
-def get_model_seires(model_type: str) -> str:
-    if model_type.startswith('qwen2'):
-        return 'qwen2'
-    else:
-        raise ValueError(f'model_type: {model_type} not supported')
+    # rename qwen1.5->qwen1_5 files
+    qwen1_5_folders = ['toolkits/model_checkpoints_convertor/qwen']
+    for folder in qwen1_5_folders:
+        dir_path = os.path.join(megatron_patch_path, folder)
+        for fname in os.listdir(dir_path):
+            old_path = os.path.join(dir_path, fname)
+            new_path = os.path.join(dir_path, fname.replace('qwen1.', 'qwen1_'))
+            if old_path != new_path:
+                shutil.move(old_path, new_path)
 
 
 def patch_megatron(tokenizer):
@@ -57,14 +63,18 @@ def patch_megatron(tokenizer):
 
     initialize._initialize_distributed = _initialize_distributed
 
-    _old_load_checkpoint = training.load_checkpoint
+    _old_load_state_dict = torch.nn.Module.load_state_dict
 
-    @wraps(_old_load_checkpoint)
-    def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', strict=False):
-        # default: strict=False
-        return _old_load_checkpoint(model, optimizer, opt_param_scheduler, load_arg=load_arg, strict=strict)
+    @wraps(_old_load_state_dict)
+    def _load_state_dict(self, state_dict: Mapping[str, Any], strict: bool = True, *args, **kwargs):
+        if strict:
+            keys = self.state_dict().keys() ^ state_dict.keys()
+            new_keys = [k for k in keys if not k.endswith('_extra_state')]
+            if keys and not new_keys:
+                strict = False
+        return _old_load_state_dict(self, state_dict, strict, *args, **kwargs)
 
-    training.load_checkpoint = load_checkpoint
+    torch.nn.Module.load_state_dict = _load_state_dict
 
     _old_training_log = training.training_log
 
