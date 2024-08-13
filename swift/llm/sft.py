@@ -158,7 +158,7 @@ class LlamaForCausalLM(transformers.LlamaForCausalLM):
         first = input_ids[:,:indices[0].item()]
         last = input_ids[:,indices[-1].item()+1:]
         outputs = self.hidden_model(
-            input_ids=torch.cat((first, last), dim=-1),
+            input_ids=first,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_values=past_key_values,
