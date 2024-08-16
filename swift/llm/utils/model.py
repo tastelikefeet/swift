@@ -4184,6 +4184,7 @@ def get_model_tokenizer_internvl(model_dir: str,
         tokenizer.eos_token = '<|im_end|>'
 
     model_config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+    model_config.hidden_size=model_config.llm_config.hidden_size
     use_flash_attn = kwargs.pop('use_flash_attn', False)
     model_config.llm_config.attn_implementation = 'flash_attention_2' if use_flash_attn else 'eager'
     model_quant_config = getattr(model_config, 'quantization_config', None)
@@ -4200,7 +4201,7 @@ def get_model_tokenizer_internvl(model_dir: str,
 
     if use_bnb and kwargs.get('is_training'):
         # patch: bnb backward shape mismatch bug
-        if model is not None and model.language_model is not None:
+        if model is not None and model.language_model is not None and getattr(model.language_model.output, 'state', None):
             model.language_model.output.state.force_no_igemmlt = True
 
     if model is not None:

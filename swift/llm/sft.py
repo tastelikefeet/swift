@@ -12,7 +12,6 @@ from packaging import version
 from transformers import IntervalStrategy
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.utils import is_torch_npu_available
-
 from swift.torchacc_utils import patch_acc_model
 from swift.trainers import Seq2SeqTrainer
 from swift.trainers.utils import can_return_loss, find_labels
@@ -337,7 +336,7 @@ def llm_sft(args: SftArguments) -> Dict[str, Any]:
         dataset_info['train_dataset'] = stat_dataset(train_dataset) if not streaming else None
         if val_dataset is not None:
             dataset_info['val_dataset'] = stat_dataset(val_dataset) if not streaming else None
-    else:
+    elif not is_deepspeed_zero3_enabled():
         dataset_info = None
         td0, tkwargs0 = template.encode(train_dataset[0])
         print_example(td0, tokenizer, tkwargs0)
