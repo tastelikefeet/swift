@@ -6,7 +6,7 @@ from copy import deepcopy
 from functools import partial
 from types import MethodType
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
-
+from contextlib import nullcontext
 import json
 import torch
 import torch.nn.functional as F
@@ -16,7 +16,7 @@ from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
 from transformers import PreTrainedTokenizerBase, StoppingCriteria
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
-
+from transformers.integrations import is_deepspeed_zero3_enabled
 from swift.llm.agent.utils import calculate_loss_scale, get_tools_prompt
 from swift.torchacc_utils import pad_and_split_batch
 from swift.utils import get_dist_setting, get_logger, upper_bound, use_torchacc
@@ -1662,9 +1662,15 @@ class InternvlTemplate(Template):
 
     def _post_encode(self, data: Any) -> Dict[str, Any]:
         embedding = self.model.get_input_embeddings()
-        device = embedding.weight.device
-        input_ids = data['input_ids']
-        inputs_embeds = embedding(input_ids).to(device=device)
+        if is_deepspeed_zero3_enabled():
+            import deepspeed
+            context = deepspeed.zero.GatheredParameters(embedding)
+        else:
+            context = nullcontext()
+        with context:
+            device = embedding.weight.device
+            input_ids = data['input_ids']
+            inputs_embeds = embedding(input_ids).to(device=device)
         pixel_values = data['pixel_values']
         if pixel_values is not None:
             pixel_values = pixel_values.to(device=device)

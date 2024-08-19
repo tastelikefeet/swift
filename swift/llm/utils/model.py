@@ -4186,6 +4186,10 @@ def get_model_tokenizer_internvl(model_dir: str,
     model_config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
     model_config.hidden_size=model_config.llm_config.hidden_size
     use_flash_attn = kwargs.pop('use_flash_attn', False)
+    model_config.use_flash_attn = use_flash_attn
+    model_config.llm_config.use_flash_attn = use_flash_attn
+    if hasattr(model_config, 'vision_config'):
+        model_config.vision_config.use_flash_attn = use_flash_attn
     model_config.llm_config.attn_implementation = 'flash_attention_2' if use_flash_attn else 'eager'
     model_quant_config = getattr(model_config, 'quantization_config', None)
 
