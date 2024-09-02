@@ -7,14 +7,13 @@ import torch
 import transformers
 from packaging import version
 
-from swift.torchacc_utils import consolidate_checkpoint
 from swift.trainers import TrainerCallback
-from swift.tuners import (AdaLoraConfig, AdapterConfig, BOFTConfig, IA3Config, LongLoRAModelType, LoraConfig,
-                          LoRAConfig, NEFTuneConfig, Swift, VeraConfig)
-from swift.tuners.llamapro import LLaMAProConfig
+from swift.tuners import (AdaLoraConfig, AdapterConfig, BOFTConfig, IA3Config, LLaMAProConfig, LongLoRAModelType,
+                          LoraConfig, LoRAConfig, NEFTuneConfig, ReftConfig, Swift, VeraConfig)
 from swift.utils import activate_model_parameters, freeze_model_parameters, get_logger, use_torchacc
 from swift.utils.module_mapping import MODEL_KEYS_MAPPING
 from .utils import SftArguments, find_all_linears, find_embedding, find_ln, is_adapter
+from .utils.callbacks import DynamicLayerActivationCallback, TrainerAdapterCallback
 
 logger = get_logger()
 
@@ -31,7 +30,8 @@ def handle_target_modules(model, args: SftArguments) -> None:
         target_modules.remove('ALL')
         target_modules += find_all_linears(model, args.quantization_bit, args.model_type, args.quant_method)
     args.target_modules = target_modules
-    logger.info(f'target_modules: {args.target_modules}')
+    if not args.target_regex:
+        logger.info(f'target_modules: {args.target_modules}')
 
 
 def handle_same_dim_target_modules(model: torch.nn.Module, config: VeraConfig):
@@ -63,7 +63,36 @@ def handle_modules_to_save(model, args: SftArguments) -> None:
     logger.info(f'modules_to_save: {args.modules_to_save}')
 
 
+def apply_liger(model_type: str):
+    from liger_kernel.transformers import (apply_liger_kernel_to_llama, apply_liger_kernel_to_mistral,
+                                           apply_liger_kernel_to_mixtral, apply_liger_kernel_to_gemma,
+                                           apply_liger_kernel_to_qwen2)
+    if 'llama3' in model_type:
+        apply_liger_kernel_to_llama()
+    elif 'mistral' in model_type:
+        apply_liger_kernel_to_mistral()
+    elif 'mixtral' in model_type:
+        apply_liger_kernel_to_mixtral()
+    elif 'gemma' in model_type:
+        apply_liger_kernel_to_gemma()
+    elif 'qwen2' in model_type:
+        apply_liger_kernel_to_qwen2()
+    else:
+        raise ValueError(f'Unsupported liger model_type: {model_type}')
+
+
 def prepare_model(model, args: SftArguments):
+    if args.use_liger:
+        # Apply liger
+        apply_liger(args.model_type)
+
+    # This model_type is used to map the model structure
+    model_type = args.model_type or args.model_id_or_path
+    for key in MODEL_KEYS_MAPPING.keys():
+        if key in model_type.lower():
+            model_type = key
+            break
+
     # Preparing LoRA
     if is_adapter(args.sft_type):
         if args.resume_from_checkpoint is None:
@@ -72,8 +101,8 @@ def prepare_model(model, args: SftArguments):
             if args.init_lora_weights and args.init_lora_weights.lower() in ('true', 'false'):
                 args.init_lora_weights = args.init_lora_weights.lower() in ('true', 'True')
             if args.target_regex:
-                logger.info(f'Value of target_modules: {args.target_modules} will have no effect '
-                            f'because target_regex value: {args.target_regex} exists.')
+                logger.info(f'Value of target_modules: `{args.target_modules}` will have no effect '
+                            f'because target_regex value: `{args.target_regex}` exists.')
             lora_kwargs = {
                 'r': args.lora_rank,
                 'target_modules': args.target_regex or args.target_modules,
@@ -86,6 +115,7 @@ def prepare_model(model, args: SftArguments):
                 'lorap_lr_ratio': args.lora_lr_ratio,
                 'init_lora_weights': args.init_lora_weights,
             }
+
             if args.sft_type in ('lora', 'longlora'):
                 # Fix the name of the layer in xcomposer that contains Plora.
                 if any(['lora_' in n for n, p in model.named_parameters()]):
@@ -144,12 +174,6 @@ def prepare_model(model, args: SftArguments):
                 model = Swift.prepare_model(model, ia3_config)
                 logger.info(f'ia3_config: {ia3_config}')
             elif args.sft_type == 'llamapro':
-                model_type = args.model_type or args.model_id_or_path
-                for key in MODEL_KEYS_MAPPING.keys():
-                    if key in model_type.lower():
-                        model_type = key
-                        break
-
                 llamapro_config = LLaMAProConfig(
                     model_type=model_type,
                     num_new_blocks=args.llamapro_num_new_blocks,
@@ -157,12 +181,6 @@ def prepare_model(model, args: SftArguments):
                 model = Swift.prepare_model(model, llamapro_config)
                 logger.info(f'llamapro_config: {llamapro_config}')
             elif args.sft_type == 'adapter':
-                model_type = args.model_type or args.model_id_or_path
-                for key in MODEL_KEYS_MAPPING.keys():
-                    if key in model_type.lower():
-                        model_type = key
-                        break
-
                 assert model_type in MODEL_KEYS_MAPPING
                 mlp_key = MODEL_KEYS_MAPPING[model_type].mlp
                 mlp_key = mlp_key.split('.{}.')[1]
@@ -207,10 +225,19 @@ def prepare_model(model, args: SftArguments):
                 )
                 model = Swift.prepare_model(model, fourier_config)
                 logger.info(f'fourier_config: {fourier_config}')
+            elif args.sft_type == 'reft':
+                reft_config = ReftConfig(
+                    model_type=model_type,
+                    layer_key=args.reft_layer_key,
+                    r=args.reft_rank,
+                    layers=args.reft_layers,
+                    intervention_type=args.reft_intervention_type,
+                    args=args.reft_args,
+                )
+                logger.info(f'reft config: {reft_config}')
+                model = Swift.prepare_model(model, {'reft': reft_config})
         else:
             if use_torchacc():
-                if args.fsdp_num > 1:
-                    consolidate_checkpoint(args.resume_from_checkpoint, 'adapter_model')
                 model = Swift.from_pretrained(
                     model, args.resume_from_checkpoint, adapter_name='default', is_trainable=True)
             else:
@@ -229,18 +256,35 @@ def prepare_model(model, args: SftArguments):
         model.train()
         model.requires_grad_(True)
 
-        if args.freeze_parameters > 0:
-            freeze_model_parameters(model, args.freeze_parameters)
+        freeze_model_parameters(model, args.freeze_parameters_ratio, args.freeze_parameters)
         if len(args.additional_trainable_parameters) > 0:
             activate_model_parameters(model, args.additional_trainable_parameters)
         if use_torchacc() and args.resume_from_checkpoint is not None:
-            if args.fsdp_num > 1:
-                consolidate_checkpoint(args.resume_from_checkpoint, 'model')
-            weights_file = os.path.join(args.resume_from_checkpoint, 'model.bin')
-            state_dict = torch.load(weights_file, map_location='cpu')
-            model.load_state_dict(state_dict, False)
-            # release memory
-            del state_dict
+            import safetensors
+            weights_file = os.path.join(args.resume_from_checkpoint, 'pytorch_model.bin')
+            safe_weights_file = os.path.join(args.resume_from_checkpoint, 'model.safetensors')
+            if os.path.isfile(weights_file) or os.path.isfile(safe_weights_file):
+                if args.save_safetensors and os.path.isfile(safe_weights_file):
+                    state_dict = safetensors.torch.load_file(safe_weights_file, device='cpu')
+                else:
+                    state_dict = torch.load(weights_file, map_location='cpu')
+                model.load_state_dict(state_dict, False)
+                del state_dict
+            else:
+                from transformers.modeling_utils import load_sharded_checkpoint
+                # We load the sharded checkpoint
+                load_result = load_sharded_checkpoint(
+                    model, args.resume_from_checkpoint, strict=False, prefer_safe=args.save_safetensors)
+                if len(load_result.missing_keys) != 0:
+                    if model._keys_to_ignore_on_save is not None and set(load_result.missing_keys) == set(
+                            model._keys_to_ignore_on_save):
+                        model.tie_weights()
+                    else:
+                        logger.warning(
+                            f'There were missing keys in the checkpoint model loaded: {load_result.missing_keys}.')
+                if len(load_result.unexpected_keys) != 0:
+                    logger.warning(
+                        f'There were unexpected keys in the checkpoint model loaded: {load_result.unexpected_keys}.')
     else:
         raise ValueError(f'args.sft_type: {args.sft_type}')
 
@@ -277,52 +321,6 @@ def prepare_model(model, args: SftArguments):
     callbacks = []
     if args.lisa_activated_layers > 0:
         assert args.sft_type == 'full', 'LISA only supports full parameter training.'
-
-        class DynamicLayerActivationCallback(TrainerCallback):
-
-            def __init__(self, n_layers: int, step_interval: int, model: torch.nn.Module):
-                super().__init__()
-                self.n_layers = n_layers
-                self.step_interval = step_interval
-                self.model = model
-                layers_name = None
-                layers = None
-                for name, module in model.named_modules():
-                    if isinstance(module, torch.nn.ModuleList):
-                        layers_name = name
-                        layers = module
-                        break
-                assert layers_name is not None
-                self.layers_attribute = layers_name
-                self.total_layers = len(layers)
-
-                # Freeze all layers upon initialization
-                self.freeze_all_layers()
-                self.active_layers_indices = []
-
-            def freeze_all_layers(self):
-                layers = self.model.get_submodule(self.layers_attribute)
-                for layer in layers:
-                    for param in layer.parameters():
-                        param.requires_grad = False
-
-            def on_step_begin(self, args, state, control, **kwargs):
-                # Check if it's time to switch active layers, including at step 0
-                if state.global_step % self.step_interval == 0 or state.global_step == 1:
-                    self.switch_active_layers()
-
-            def switch_active_layers(self):
-                # First, disable gradients for all layers
-                self.freeze_all_layers()
-
-                # Randomly select n_layers to activate
-                layers = self.model.get_submodule(self.layers_attribute)
-                self.active_layers_indices = np.random.choice(range(self.total_layers), self.n_layers, replace=False)
-                # Enable gradients only for the selected layers
-                for idx in self.active_layers_indices:
-                    for param in layers[idx].parameters():
-                        param.requires_grad = True
-
         lisa_callback = DynamicLayerActivationCallback(
             n_layers=args.lisa_activated_layers,  # Number of layers to activate
             step_interval=args.lisa_step_interval,  # Step interval to update active layers
@@ -330,29 +328,6 @@ def prepare_model(model, args: SftArguments):
         lisa_callback.switch_active_layers()  # Make trainable parameters printing a correct value
         callbacks.append(lisa_callback)
 
-    class TrainerAdapterCallback(TrainerCallback):
-
-        def __init__(self):
-            self.global_step = 0
-
-        # offload original_modules to cpu, to save memory
-        def on_train_begin(self, _args, state, control, **kwargs):
-            if hasattr(model, 'set_active_adapters'):
-                model.set_active_adapters(model.adapters.keys(), offload='cpu')
-            if args.sft_type == 'adalora':
-                model.peft_config['default'].total_step = state.max_steps
-
-                def zero_grad(_self, *args, **kwargs):
-                    _self.update_and_allocate(self.global_step + 1)
-                    _self._zero_grad(*args, **kwargs)
-
-                model._zero_grad = model.zero_grad
-                model.zero_grad = types.MethodType(zero_grad, model)
-
-        def on_step_end(self, _args, state, control, **kwargs):
-            if args.sft_type == 'adalora':
-                self.global_step = state.global_step
-
     if is_adapter(args.sft_type) and args.tuner_backend == 'swift':
-        callbacks.append(TrainerAdapterCallback())
+        callbacks.append(TrainerAdapterCallback(args))
     return model, callbacks

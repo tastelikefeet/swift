@@ -1,5 +1,7 @@
 ## LLM文档
 
+[English Documentation](https://swift.readthedocs.io/en/latest/LLM/index.html)
+
 ### 📚教程
 
 1. [LLM推理文档](LLM推理文档.md)
@@ -7,7 +9,7 @@
 3. [人类偏好对齐训练文档](人类偏好对齐训练文档.md)
 4. [界面训练与推理](../GetStarted/%E7%95%8C%E9%9D%A2%E8%AE%AD%E7%BB%83%E6%8E%A8%E7%90%86.md)
 5. [LLM评测文档](LLM评测文档.md)
-6. [LLM量化文档](LLM量化文档.md)
+6. [LLM量化与导出文档](LLM量化与导出文档.md)
 7. [OLLAMA导出文档](OLLAMA导出文档.md)
 8. [VLLM推理加速与部署](VLLM推理加速与部署.md)
 9. [LmDeploy推理加速与部署](LmDeploy推理加速与部署.md)
@@ -29,7 +31,7 @@
 
 ### 🐔参考文档
 1. [自定义模型和数据集](自定义与拓展.md)
-2. [微调推理的命令行参数](命令行参数.md)
+2. [命令行参数文档](命令行参数.md)
 3. [支持的模型和数据集列表](支持的模型和数据集.md)
 4. [运行速度与显存的Benchmark](Benchmark.md)
 5. [HuggingFace生态兼容](HuggingFace生态兼容.md)

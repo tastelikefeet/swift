@@ -330,6 +330,7 @@ class TestRun(unittest.TestCase):
                         rlhf_type=rlhf_type,
                         model_type=model,
                         dataset=dataset_name,
+                        max_length=4096,
                         train_dataset_sample=100,
                         eval_steps=5))
                 best_model_checkpoint = output['best_model_checkpoint']
@@ -460,7 +461,7 @@ class TestTrainer(unittest.TestCase):
                 push_to_hub=push_to_hub,
                 hub_token=None,  # use env var
                 hub_private_repo=True,
-                push_hub_strategy='push_best',
+                hub_strategy='every_save',
                 hub_model_id=self.hub_model_id,
                 overwrite_output_dir=True,
                 save_steps=10,

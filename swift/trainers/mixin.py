@@ -1,5 +1,6 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 # Part of the implementation is borrowed from huggingface/transformers.
+import inspect
 import os
 import re
 import shutil
@@ -21,189 +22,21 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 from transformers.data.data_collator import DataCollator
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_utils import unwrap_model
-from transformers.trainer import (ADAPTER_CONFIG_NAME, ADAPTER_SAFE_WEIGHTS_NAME, ADAPTER_WEIGHTS_NAME, CONFIG_NAME,
-                                  PREFIX_CHECKPOINT_DIR, SAFE_WEIGHTS_NAME, TRAINER_STATE_NAME, TRAINING_ARGS_NAME,
-                                  WEIGHTS_NAME, IntervalStrategy, Trainer, TrainerCallback, is_peft_available)
+from transformers.trainer import PREFIX_CHECKPOINT_DIR, TRAINER_STATE_NAME, Trainer, TrainerCallback
 from transformers.trainer_utils import EvalPrediction
 from transformers.training_args import TrainingArguments
 from transformers.utils import is_sagemaker_mp_enabled, is_torch_npu_available
 
-from swift.hub import Repository
 from swift.hub.check_model import check_local_model_is_latest
 from swift.torchacc_utils import (save_ta_ddp_checkpoint, save_ta_fsdp_checkpoint, ta_load_optimizer_and_scheduler,
                                   ta_save_optimizer_and_scheduler, ta_trim_graph)
 from swift.tuners import SwiftModel
-from swift.utils import check_json_format, create_ms_repo, get_logger, use_torchacc
+from swift.utils import check_json_format, get_logger, use_torchacc
 from swift.utils.constants import Invoke
 from .optimizers.galore import create_optimizer_and_scheduler
 from .utils import can_return_loss, find_labels, get_function, is_instance_of_ms_model
 
 logger = get_logger()
-
-
-def _push_to_hub(self: Repository, commit_message: str = 'Commit files to Modelscope Hub', **kwargs):
-    blocking = kwargs.get('blocking', True)
-    self.push(commit_message)
-    if not blocking:
-        # Compatible with transformers
-        return None, None
-    else:
-        return None
-
-
-class PushToMsHubMixin:
-    repo: Repository
-
-    def _add_patterns_to_file(self, file_name: str, patterns: List[str], commit_message: Optional[str] = None) -> None:
-        # Make sure we only do this on the main process
-        if not self.is_world_process_zero():
-            return
-        if isinstance(patterns, str):
-            patterns = [patterns]
-        if commit_message is None:
-            commit_message = f'Add `{patterns[0]}` patterns to {file_name}'
-
-        # Get current file content
-        repo_dir = self.repo.model_dir
-        file_path = os.path.join(repo_dir, file_name)
-        if os.path.exists(file_path):
-            with open(file_path, 'r', encoding='utf-8') as f:
-                current_content = f.read()
-        else:
-            current_content = ''
-        # Add the patterns to file
-        content = current_content
-        for pattern in patterns:
-            if pattern not in content:
-                if len(content) > 0 and not content.endswith('\n'):
-                    content += '\n'
-                content += f'{pattern}\n'
-
-        # Write the file if it has changed
-        if content != current_content:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                logger.debug(f'Writing {file_name} file. Content: {content}')
-                f.write(content)
-        self.repo.push(commit_message)
-
-    def _add_patterns_to_gitignore(self, patterns: List[str], commit_message: Optional[str] = None) -> None:
-        self._add_patterns_to_file('.gitignore', patterns, commit_message)
-
-    def _add_patterns_to_gitattributes(self, patterns: List[str], commit_message: Optional[str] = None) -> None:
-        new_patterns = []
-        suffix = 'filter=lfs diff=lfs merge=lfs -text'
-        for pattern in patterns:
-            if suffix not in pattern:
-                pattern = f'{pattern} {suffix}'
-            new_patterns.append(pattern)
-        file_name = '.gitattributes'
-        if commit_message is None:
-            commit_message = f'Add `{patterns[0]}` patterns to {file_name}'
-        self._add_patterns_to_file(file_name, new_patterns, commit_message)
-
-    def init_hf_repo(self) -> None:
-        """init ms repo. Compatible with transformers>=4.34"""
-        self.init_git_repo(at_init=True)
-
-    def init_git_repo(self, at_init: bool = False) -> None:
-        if not self.is_world_process_zero():
-            return
-        if (os.path.exists(self.args.output_dir) and os.listdir(self.args.output_dir) and self.args.overwrite_output_dir
-                and at_init):
-            # directory not empty.
-            shutil.rmtree(self.args.output_dir)
-        self.args.hub_model_id = create_ms_repo(self.args.hub_model_id, self.args.hub_token, self.args.hub_private_repo)
-        self.repo = Repository(self.args.output_dir, self.args.hub_model_id)
-        self._add_patterns_to_gitattributes(['*.safetensors', '*.bin', '*.pt'])
-        self.repo.push_to_hub = MethodType(_push_to_hub, self.repo)
-        self.repo.local_dir = self.repo.model_dir  # hf compatibility
-
-        # By default, ignore the checkpoint folders
-        if self.args.push_hub_strategy != 'all_checkpoints':
-            self._add_patterns_to_gitignore(['checkpoint-*/', 'tmp-checkpoint-*/'])
-
-        # Add 'runs/' to .gitignore, ignore tensorboard files
-        self._add_patterns_to_gitignore(['runs/'])
-
-        # Add '*.sagemaker' to .gitignore if using SageMaker
-        if os.environ.get('SM_TRAINING_ENV'):
-            self._add_patterns_to_gitignore(['*.sagemaker-uploading', '*.sagemaker-uploaded'],
-                                            'Add `*.sagemaker` patterns to .gitignore')
-
-        self.push_in_progress = None
-
-    def push_to_hub(self, commit_message: str = 'End of training', **kwargs) -> None:
-        # user calls manually `push_to_hub` with `self.args.push_to_hub = False`
-        create_model_card = kwargs.pop('create_model_card', None)
-        if not hasattr(self, 'repo'):
-            self.init_git_repo()
-        self.save_model(_internal_call=True)
-
-        if not self.is_world_process_zero():
-            return
-
-        self.repo.push_to_hub(commit_message, **kwargs)
-        # push separately the model card to be independent from the rest of the model
-        readme_path = os.path.join(self.args.output_dir, 'README.md')
-        if create_model_card is None:
-            create_model_card = not os.path.exists(readme_path)
-        if create_model_card and self.args.should_save:
-            model_name = kwargs.pop('model_name', None)
-            if model_name is None and self.args.should_save:
-                if self.args.hub_model_id is not None:
-                    model_name = self.args.hub_model_id.split('/')[-1]
-                else:
-                    model_name = os.path.basename(self.args.output_dir)
-            self.create_model_card(model_name=model_name, **kwargs)
-            self.repo.push_to_hub('update model card README.md', **kwargs)
-
-    def _push_from_checkpoint(self, checkpoint_folder: str) -> None:
-        """Compatible with transformers>=4.32"""
-        # Only push from one node.
-        if not self.is_world_process_zero() or self.args.push_hub_strategy == 'end':
-            return
-        output_dir = self.args.output_dir
-        # To avoid a new synchronization of all model weights, we just copy the file from the checkpoint folder
-        modeling_files = [CONFIG_NAME, WEIGHTS_NAME, SAFE_WEIGHTS_NAME]
-        if is_peft_available():
-            modeling_files.extend([ADAPTER_CONFIG_NAME, ADAPTER_WEIGHTS_NAME, ADAPTER_SAFE_WEIGHTS_NAME])
-        for modeling_file in modeling_files:
-            if os.path.isfile(os.path.join(checkpoint_folder, modeling_file)):
-                shutil.copy(os.path.join(checkpoint_folder, modeling_file), os.path.join(output_dir, modeling_file))
-        # Saving the tokenizer is fast and we don't know how many files it may have spawned, so we resave it to be sure.
-        if self.tokenizer is not None:
-            self.tokenizer.save_pretrained(output_dir)
-        # Same for the training arguments
-        torch.save(self.args, os.path.join(output_dir, TRAINING_ARGS_NAME))
-
-        try:
-            if self.args.push_hub_strategy == 'checkpoint':
-                # Temporarily move the checkpoint just saved for the push
-                tmp_checkpoint = os.path.join(output_dir, 'last-checkpoint')
-                # We have to remove the "last-checkpoint" dir if it exists, otherwise the checkpoint is moved as a
-                # subfolder.
-                if os.path.isdir(tmp_checkpoint):
-                    shutil.rmtree(tmp_checkpoint)
-                shutil.move(checkpoint_folder, tmp_checkpoint)
-
-            if self.args.save_strategy == IntervalStrategy.STEPS:
-                commit_message = f'Training in progress, step {self.state.global_step}'
-            else:
-                commit_message = f'Training in progress, epoch {int(self.state.epoch)}'
-            if self.args.push_hub_strategy == 'push_best':
-                folder, checkpoint_name = os.path.split(checkpoint_folder)
-                checkpoint_name = checkpoint_name.replace('tmp-checkpoint-', 'checkpoint-')
-                last_model_checkpoint = os.path.join(folder, checkpoint_name)
-                if last_model_checkpoint == self.state.best_model_checkpoint:
-                    self.repo.push_to_hub(commit_message=commit_message, blocking=False, auto_lfs_prune=True)
-            else:
-                self.repo.push_to_hub(commit_message=commit_message, blocking=False, auto_lfs_prune=True)
-        except Exception as e:
-            logger.error(f'Error when pushing to hub: {e}')
-        finally:
-            if self.args.push_hub_strategy == 'checkpoint':
-                # Move back the checkpoint to its place
-                shutil.move(tmp_checkpoint, checkpoint_folder)
 
 
 class SwiftMixin:
@@ -328,6 +161,28 @@ class SwiftMixin:
 
         ta_save_optimizer_and_scheduler(self.optimizer, self.lr_scheduler, output_dir)
 
+    def _save_initial_model(self, output_dir):
+        model = unwrap_model(self.model)
+        if isinstance(model, PeftModel):
+            config = model.peft_config.get('default', {})
+            init_lora_weights = getattr(config, 'init_lora_weights', '')
+            if isinstance(init_lora_weights, str) and ('pissa' in init_lora_weights or 'olora' in init_lora_weights):
+                config.init_lora_weights = True
+                model.save_pretrained(os.path.join(output_dir, 'initial_model'))
+                config.init_lora_weights = init_lora_weights
+
+    def _save_converted_model(self, output_dir):
+        model = unwrap_model(self.model)
+        if isinstance(model, PeftModel):
+            config = model.peft_config.get('default', {})
+            init_lora_weights = getattr(config, 'init_lora_weights', '')
+            if isinstance(init_lora_weights, str) and ('pissa' in init_lora_weights or 'olora' in init_lora_weights):
+                model.save_pretrained(
+                    os.path.join(output_dir, 'converted'),
+                    path_initial_model_for_weight_conversion=os.path.join(os.path.dirname(output_dir), 'initial_model'),
+                )
+                config.init_lora_weights = init_lora_weights
+
     def _load_optimizer_and_scheduler(self, checkpoint):
         if not (use_torchacc() and self.sft_args.fsdp_num > 1):
             if self._resume_only_model:
@@ -337,7 +192,18 @@ class SwiftMixin:
                 return
             else:
                 # Check if saved optimizer or scheduler states exist
-                return super()._load_optimizer_and_scheduler(checkpoint)
+                super()._load_optimizer_and_scheduler(checkpoint)
+                try:
+                    # fix mp+ddp adamw
+                    for v in self.optimizer.state.values():
+                        if 'step' in v:
+                            # not on the same device
+                            device_set = set([t.device for t in v.values()]) - {v['step'].device, torch.device('cpu')}
+                            if len(device_set) >= 1:
+                                v['step'] = v['step'].to('cpu')
+                except Exception:
+                    pass
+                return
 
         if checkpoint is None or self.args.save_only_model:
             return
@@ -416,24 +282,27 @@ class SwiftMixin:
                         shutil.copy(src_path, dst_path)
                     elif os.path.isdir(src_path):
                         shutil.copytree(src_path, dst_path)
+        self._save_converted_model(output_dir)
 
     def _save_checkpoint(self, model, trial, metrics=None):
         self.state.last_model_checkpoint = os.path.join(self.args.output_dir, f'checkpoint-{self.state.global_step}')
         if is_deepspeed_zero3_enabled() and not hasattr(self.deepspeed, '_zero3_consolidated_16bit_state_dict_origin'):
+            parameters = inspect.signature(self.deepspeed._zero3_consolidated_16bit_state_dict).parameters
+            if 'exclude_frozen_parameters' in parameters:
 
-            def _zero3_consolidated_16bit_state_dict(_model, exclude_frozen_parameters=False):
-                unwrapped = unwrap_model(_model)
-                exclude_frozen_parameters = False
-                if isinstance(unwrapped, SwiftModel) and unwrapped.has_additional_modules:
-                    exclude_frozen_parameters = True
-                if isinstance(unwrapped, PeftModel):
-                    exclude_frozen_parameters = True
-                return _model._zero3_consolidated_16bit_state_dict_origin(exclude_frozen_parameters)
+                def _zero3_consolidated_16bit_state_dict(_model, exclude_frozen_parameters=False):
+                    unwrapped = unwrap_model(_model)
+                    exclude_frozen_parameters = False
+                    if isinstance(unwrapped, SwiftModel) and unwrapped.has_additional_modules:
+                        exclude_frozen_parameters = True
+                    if isinstance(unwrapped, PeftModel):
+                        exclude_frozen_parameters = True
+                    return _model._zero3_consolidated_16bit_state_dict_origin(exclude_frozen_parameters)
 
-            self.deepspeed._zero3_consolidated_16bit_state_dict_origin = (
-                self.deepspeed._zero3_consolidated_16bit_state_dict)
-            self.deepspeed._zero3_consolidated_16bit_state_dict = MethodType(_zero3_consolidated_16bit_state_dict,
-                                                                             self.deepspeed)
+                self.deepspeed._zero3_consolidated_16bit_state_dict_origin = (
+                    self.deepspeed._zero3_consolidated_16bit_state_dict)
+                self.deepspeed._zero3_consolidated_16bit_state_dict = MethodType(_zero3_consolidated_16bit_state_dict,
+                                                                                 self.deepspeed)
         if version.parse(transformers.__version__) >= version.parse('4.36') or not self.args.save_only_model:
             result = super()._save_checkpoint(model, trial, metrics)
         else:
@@ -535,6 +404,8 @@ class SwiftMixin:
             resume_from_checkpoint = None
         if self._resume_from_checkpoint is not None and not is_sagemaker_mp_enabled() and not self.is_fsdp_enabled:
             self._load_from_checkpoint(self._resume_from_checkpoint)
+
+        self._save_initial_model(self.args.output_dir)
         res = super().train(resume_from_checkpoint, *args, **kwargs)
         self._resume_from_checkpoint = None
         if self.max_memory != 0:

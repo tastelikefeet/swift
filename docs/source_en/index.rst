@@ -25,7 +25,7 @@ Swift DOCUMENTATION
    LLM/LLM-fine-tuning.md
    LLM/Human-Preference-Alignment-Training-Documentation.md
    LLM/LLM-eval.md
-   LLM/LLM-quantization.md
+   LLM/LLM-quantization-and-export.md
    LLM/OLLaMA-Export.md
    LLM/VLLM-inference-acceleration-and-deployment.md
    LLM/LmDeploy-inference-acceleration-and-deployment.md
@@ -57,6 +57,7 @@ Swift DOCUMENTATION
    Multi-Modal/vllm-inference-acceleration.md
    Multi-Modal/mutlimodal-deployment.md
    Multi-Modal/qwen-vl-best-practice.md
+   Multi-Modal/qwen2-vl-best-practice.md
    Multi-Modal/qwen-audio-best-practice.md
    Multi-Modal/llava-best-practice.md
    Multi-Modal/llava-video-best-practice.md

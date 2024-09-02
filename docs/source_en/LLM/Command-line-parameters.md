@@ -20,25 +20,29 @@
   - DeepSeek-VL model: `https://github.com/deepseek-ai/DeepSeek-VL`
   - YI-VL model: `https://github.com/01-ai/Yi`
   - LLAVA model: `https://github.com/haotian-liu/LLaVA.git`
-- `--sft_type`: Fine-tuning method, default is `'lora'`. Options include: 'lora', 'full', 'longlora', 'adalora', 'ia3', 'llamapro', 'adapter', 'vera', 'boft', 'fourierft'. If using qlora, you need to set `--sft_type lora --quantization_bit 4`.
+- `--sft_type`: Fine-tuning method, default is `'lora'`. Options include: 'lora', 'full', 'longlora', 'adalora', 'ia3', 'llamapro', 'adapter', 'vera', 'boft', 'fourierft', 'reft'. If using qlora, you need to set `--sft_type lora --quantization_bit 4`.
 - `--packing`: pack the dataset length to `max-length`, default `False`.
 - `--full_determinism`: Fix all the values in training, default `False`.
 - `--auto_find_batch_size`: Auto find batch size according to the GPU memory, default `False`.
 - `--streaming`: Whether to use iterable dataset, Default `False`.
-- `--freeze_parameters`: When sft_type is set to 'full', freeze the bottommost parameters of the model. Range is 0. ~ 1., default is `0.`. This provides a compromise between lora and full fine-tuning.
-- `--additional_trainable_parameters`: In addition to freeze_parameters, only allowed when sft_type is 'full', default is `[]`. For example, if you want to train embedding layer in addition to 50% of parameters, you can set `--freeze_parameters 0.5 --additional_trainable_parameters transformer.wte`, all parameters starting with `transformer.wte` will be activated. You can also set `--freeze_parameters 1 --additional_trainable_parameters xxx` to customize the trainable layers.
+- `--freeze_parameters`: When sft_type is specified as 'full', the layers prefixed with freeze_parameters will be frozen. The default value is `[]`. For example: `--freeze_parameters visual`.
+- `--freeze_vit`: When sft_type is set to 'full' and a multimodal model is being trained, the parameters of vit can be frozen by setting this parameter to True. The default value is `False`.
+- `--freeze_parameters_ratio`: When sft_type is set to 'full', freeze the bottommost parameters of the model. Range is 0. ~ 1., default is `0.`. This provides a compromise between lora and full fine-tuning.
+- `--additional_trainable_parameters`: In addition to freeze_parameters, only allowed when sft_type is 'full', default is `[]`. For example, if you want to train embedding layer in addition to 50% of parameters, you can set `--freeze_parameters_ratio 0.5 --additional_trainable_parameters transformer.wte`, all parameters starting with `transformer.wte` will be activated. You can also set `--freeze_parameters_ratio 1 --additional_trainable_parameters xxx` to customize the trainable layers.
 - `--tuner_backend`: Backend support for lora, qlora, default is `'peft'`. Options include: 'swift', 'peft', 'unsloth'.
 - `--template_type`: Type of dialogue template used, default is `'AUTO'`, i.e. look up `template` in `MODEL_MAPPING` based on `model_type`. Available `template_type` options can be found in `TEMPLATE_MAPPING.keys()`.
 - `--output_dir`: Directory to store ckpt, default is `'output'`. We will append `model_type` and fine-tuning version number to this directory, allowing users to do multiple comparative experiments on different models without changing the `output_dir` command line argument. If you don't want to append this content, specify `--add_output_dir_suffix false`.
 - `--add_output_dir_suffix`: Default is `True`, indicating that a suffix of `model_type` and fine-tuning version number will be appended to the `output_dir` directory. Set to `False` to avoid this behavior.
 - `--ddp_backend`: Backend support for distributed training, default is `None`. Options include: 'nccl', 'gloo', 'mpi', 'ccl'.
+- `--ddp_timeout`: DDP timeout. Default `1800` seconds.
 - `--seed`: Global seed, default is `42`. Used to reproduce training results.
 - `--resume_from_checkpoint`: Used for resuming training from a checkpoint, default is `None`. You can set it to the path of the checkpoint, for example: `--resume_from_checkpoint output/qwen-7b-chat/vx-xxx/checkpoint-xxx`, to resume training from that point. Supports adjusting `--resume_only_model` to only read the model file during checkpoint continuation.
 - `--resume_only_model`: Default is `False`, which means strict checkpoint continuation, this will read the weights of the model, optimizer, lr_scheduler, and the random seeds stored on each device, and continue training from the last paused steps. If set to `True`, it will only read the weights of the model.
 - `--dtype`: torch_dtype when loading base model, default is `'AUTO'`, i.e. intelligently select dtype: if machine does not support bf16, use fp16; if `MODEL_MAPPING` specifies torch_dtype for corresponding model, use its dtype; otherwise use bf16. Options include: 'bf16', 'fp16', 'fp32'.
+- `--model_kwargs`: Used for passing additional parameters to the multimodal model, for example: `'{"hd_num": 16}'`. You can either pass a JSON string or directly pass a dictionary. The default is `None`. In addition to using this parameter, you can also pass it through environment variables, for example: `HD_NUM=16`.
 - `--dataset`: Used to select the training dataset, default is `[]`. You can see the list of available datasets [here](Supported-models-datasets.md#Datasets). If you need to train with multiple datasets, you can use ',' or ' ' to separate them, for example: `--dataset alpaca-en,alpaca-zh` or `--dataset alpaca-en alpaca-zh`. It supports Modelscope Hub/HuggingFace Hub/local paths, subset selection, and dataset sampling. The specified format for each dataset is as follows: `[HF or MS::]{dataset_name} or {dataset_id} or {dataset_path}[:subset1/subset2/...][#dataset_sample]`. The simplest case requires specifying only dataset_name, dataset_id, or dataset_path. Customizing datasets can be found in the [Customizing and Extending Datasets document](Customization.md#custom-dataset)
   - Supports MS and HF hub, as well as dataset_sample. For example, 'MS::alpaca-zh#2000', 'HF::jd-sentiment-zh#2000' (the default hub used is controlled by the `USE_UF` environment variable, default is MS).
-  - More fine-grained control over subsets: It uses the subsets specified during registration by default (if not specified during registration, it uses 'default'). For example, 'sharegpt-gpt4'. If subsets are specified, it uses the corresponding subset of the dataset. For example, 'sharegpt-gpt4:default/V3_format#2000'. Separated by '/'.
+  - More fine-grained control over subsets: It uses the subsets specified during registration by default (if not specified during registration, it uses 'default'). For example, 'sharegpt-gpt4'. If subsets are specified, it uses the corresponding subset of the dataset. For example, 'sharegpt-gpt4:default/V3_format#2000'. Here, the `default` and `V3_format` sub-datasets are used, separated by '/', and 2000 entries are selected.
   - Support for dataset_id. For example, 'AI-ModelScope/alpaca-gpt4-data-zh#2000', 'HF::llm-wizard/alpaca-gpt4-data-zh#2000', 'hurner/alpaca-gpt4-data-zh#2000', 'HF::shibing624/alpaca-zh#2000'. If the dataset_id has been registered, it will use the preprocessing function, subsets, split, etc. specified during registration. Otherwise, it will use `SmartPreprocessor`, support 5 dataset formats, and use 'default' subsets, with split set to 'train'. The supported dataset formats can be found in the [Customizing and Extending Datasets document](Customization.md#custom-dataset).
   - Support for dataset_path. For example, '1.jsonl#5000' (if it is a relative path, it is relative to the running directory).
 - `--val_dataset`: Specify separate validation datasets with the same format of the `dataset` argument, default is `[]`. If using `val_dataset`, the `dataset_test_ratio` will be ignored.
@@ -78,9 +82,9 @@
 - `--use_dora`: Default is `False`, whether to use `DoRA`.
 - `--use_rslora`: Default is `False`, whether to use `RS-LoRA`.
 - `--neftune_noise_alpha`: The noise coefficient added by `NEFTune` can improve performance of instruction fine-tuning, default is `None`. Usually can be set to 5, 10, 15. See [related paper](https://arxiv.org/abs/2310.05914).
-- `--neftune_backend`: The backend of `NEFTune`, default uses `transformers` library, may encounter incompatibility when training VL models, in which case it's recommended to specify as `swift`.
+- `--neftune_backend`: The backend of `NEFTune`, supported values are `transformers`, `swift`, default is `transformers`.
 - `--gradient_checkpointing`: Whether to enable gradient checkpointing, default is `True`. This can be used to save memory, although it slightly reduces training speed. Has significant effect when max_length and batch_size are large.
-- `--deepspeed`: Specifies the path to the deepspeed configuration file or directly passes in configuration information in json format, default is `None`, i.e. deepspeed is not enabled. Deepspeed can save memory. We have written a default [ZeRO-2 configuration file](https://github.com/modelscope/swift/blob/main/swift/llm/ds_config/zero2.json), [ZeRO-3 configuration file](https://github.com/modelscope/swift/blob/main/swift/llm/ds_config/zero3.json). You only need to specify 'default-zero2' to use the default zero2 config file; specify 'default-zero3' to use the default zero3 config file.
+- `--deepspeed`: Used to specify the path to the deepspeed configuration file or directly pass JSON formatted configuration information. By default, it is set to `None`, which means deepspeed is not enabled. Deepspeed can save GPU memory. We have written default [ZeRO-2 configuration file](https://github.com/modelscope/swift/blob/main/swift/llm/ds_config/zero2_offload.json), [ZeRO-3 configuration file](https://github.com/modelscope/swift/blob/main/swift/llm/ds_config/zero3.json), [ZeRO-2 Offload configuration file](https://github.com/modelscope/swift/blob/main/swift/llm/ds_config/zero2_offload.json ), and [ZeRO-3 Offload configuration file](https://github.com/modelscope/swift/blob/main/swift/llm/ds_config/zero3_offload.json). You only need to specify 'default-zero2', 'default-zero3', 'zero2-offload', 'zero3-offload'.
 - `--batch_size`: Batch_size during training, default is `1`. Increasing batch_size can improve GPU utilization, but won't necessarily improve training speed, because within a batch, shorter sentences need to be padded to the length of the longest sentence in the batch, introducing invalid computations.
 - `--eval_batch_size`: Batch_size during evaluation, default is `None`, i.e. set to 1 when `predict_with_generate` is True, set to `batch_size` when False.
 - `--num_train_epochs`: Number of epochs to train, default is `1`. If `max_steps >= 0`, this overrides `num_train_epochs`. Usually set to 3 ~ 5.
@@ -99,7 +103,7 @@
 - `--warmup_steps`: The number of warmup steps, default is `0`. If warmup_steps > 0 is set, it overrides warmup_ratio.
 - `--eval_steps`: Evaluate every this many steps, default is `50`.
 - `--save_steps`: Save every this many steps, default is `None`, i.e. set to `eval_steps`.
-- `--save_only_model`: Whether to save only model parameters, without saving intermediate states needed for checkpoint resuming, default is `None`, i.e. if `sft_type` is 'lora' and not using deepspeed (`deepspeed` is `None`), set to False, otherwise set to True (e.g. using full fine-tuning or deepspeed).
+- `--save_only_model`: Whether to save only model parameters, without saving intermediate states needed for checkpoint resuming, default is `False`.
 - `--save_total_limit`: Number of checkpoints to save, default is `2`, i.e. save best and last checkpoint. If set to -1, save all checkpoints.
 - `--logging_steps`: Print training information (e.g. loss, learning_rate, etc.) every this many steps, default is `5`.
 - `--dataloader_num_workers`: Default value is `None`. If running on a Windows machine, set it to `0`; otherwise, set it to `1`.
@@ -107,7 +111,7 @@
 - `--hub_model_id`: Model_id to push to on ModelScope Hub, default is `None`, i.e. set to `f'{model_type}-{sft_type}'`. You can set this to model_id or repo_name. We will infer user_name based on hub_token. If the remote repository to push to does not exist, a new repository will be created, otherwise the previous repository will be reused. This parameter only takes effect when `push_to_hub` is set to True.
 - `--hub_token`: SDK token needed for pushing. Can be obtained from [https://modelscope.cn/my/myaccesstoken](https://modelscope.cn/my/myaccesstoken), default is `None`, i.e. obtained from environment variable `MODELSCOPE_API_TOKEN`. This parameter only takes effect when `push_to_hub` is set to True.
 - `--hub_private_repo`: Whether to set the permission of the pushed model repository on ModelScope Hub to private, default is `False`. This parameter only takes effect when `push__to_hub` is set to True.
-- `--push_hub_strategy`: Push strategy, default is `'push_best'`. Options include: 'end', 'push_best', 'push_last', 'checkpoint', 'all_checkpoints'. 'push_best' means when saving weights each time, push and overwrite the best model from before, 'push_last' means when saving weights each time, push and overwrite the last weights from before, 'end' means only push the best model at the end of training. This parameter only takes effect when `push_to_hub` is set to True.
+- `--hub_strategy`: Push strategy, default is `'every_save'`. Options include: 'end', 'every_save', 'checkpoint', 'all_checkpoints'. This parameter shares the same meaning from transformers, and only takes effect when `push_to_hub` is set to True.
 - `--test_oom_error`: Used to detect whether training will cause OOM, default is `False`. If set to True, will sort the training set in descending order by max_length, easy for OOM testing. This parameter is generally used for testing, use carefully.
 - `--disable_tqdm`: Whether to disable tqdm, useful when launching script with `nohup`. Default is `False`, i.e. enable tqdm.
 - `--lazy_tokenize`: If set to False, preprocess all text before `trainer.train()`. If set to True, delay encoding text, reducing preprocessing wait and memory usage, useful when processing large datasets. Default is `None`, i.e. we intelligently choose based on template type, usually set to False for LLM models, set to True for multimodal models (to avoid excessive memory usage from loading images and audio).
@@ -124,11 +128,11 @@
 - `--save_safetensors`: Default is `True`.
 - `--include_num_input_tokens_seen`: Default is `False`. Tracks the number of input tokens seen throughout training.
 - `--max_new_tokens`: Default is `2048`. This parameter only takes effect when `predict_with_generate` is set to True.
-- `--do_sample`: Default is `True`. This parameter only takes effect when `predict_with_generate` is set to True.
-- `--temperature`: Default is `0.3`. This parameter only takes effect when `do_sample` is set to True. This parameter will be used as default value in deployment parameters.
-- `--top_k`: Default is `20`. This parameter only takes effect when `do_sample` is set to True. This parameter will be used as default value in deployment parameters.
-- `--top_p`: Default is `0.7`. This parameter only takes effect when `do_sample` is set to True. This parameter will be used as default value in deployment parameters.
-- `--repetition_penalty`: Default is `1.`. This parameter will be used as default value in deployment parameters.
+- `--do_sample`: Reference document: [https://huggingface.co/docs/transformers/main_classes/text_generation](https://huggingface.co/docs/transformers/main_classes/text_generation). Default is `None`, inheriting the model's generation_config. This parameter only takes effect when `predict_with_generate` is set to True.
+- `--temperature`: Default is `None`, inheriting the model's generation_config. This parameter only takes effect when `do_sample` is set to True. This parameter will be used as default value in deployment parameters.
+- `--top_k`: Default is `None`, inheriting the model's generation_config. This parameter only takes effect when `do_sample` is set to True. This parameter will be used as default value in deployment parameters.
+- `--top_p`: Default is `None`, inheriting the model's generation_config. This parameter only takes effect when `do_sample` is set to True. This parameter will be used as default value in deployment parameters.
+- `--repetition_penalty`: Default is `None`, inheriting the model's generation_config. This parameter will be used as default value in deployment parameters.
 - `--num_beams`: Default is `1`. This parameter only takes effect when `predict_with_generate` is set to True.
 - `--gpu_memory_fraction`: Default is `None`. This parameter aims to run training under a specified maximum available GPU memory percentage, used for extreme testing.
 - `--train_dataset_mix_ratio`: Default is `0.`. This parameter defines how to mix datasets for training. When this parameter is specified, it will mix the training dataset with a multiple of `train_dataset_mix_ratio` of the general knowledge dataset specified by `train_dataset_mix_ds`. This parameter has been deprecated, please use `--dataset {dataset_name}#{dataset_sample}` to mix datasets.
@@ -141,7 +145,7 @@
   - The application priority of matching rules is as follows, from highest to lowest: query fields > specific response fields > regular expression matching rules.
 - `--custom_register_path`: Default is `None`. Pass in a `.py` file used to register templates, models, and datasets.
 - `--custom_dataset_info`: Default is `None`. Pass in the path to an external `dataset_info.json`, a JSON string, or a dictionary. Used to register custom datasets. The format example: https://github.com/modelscope/swift/blob/main/swift/llm/data/dataset_info.json
-- `--device_map_config_path`: Manually configure the model's device map from a local file, defaults to None.
+- `--device_map_config`: Manually configure the model's device_map, default is `None`. You can pass a local path (.json), a JSON string, or a dict.
 - `--device_max_memory`: The max memory of each device can use for `device_map`, `List`, default is `[]`, The number of values must equal to the device count. Like `10GB 10GB`.
 
 ### Long Context
@@ -248,6 +252,23 @@ The following parameters take effect when `sft_type` is set to `ia3`.
 
 - `--ia3_feedforward_modules`: Specify the Linear name of IA3's MLP, this name must be in `ia3_target_modules`.
 
+### ReFT Fine-tuning Parameters
+
+The following parameters take effect when the `sft_type` is set to `reft`.
+
+> 1. ReFT tuner cannot be merged
+> 2. ReFT and gradient_checkpointing are not compatible
+> 3. If error happens when using ReFT and DeepSpeed, please uninstall DeepSpeed
+
+- `--reft_layers`: Specifies which layers ReFT is applied to; defaults to `None`, meaning all layers. You can input a list of layer numbers, for example: `--reft_layers 1 2 3 4`.
+- `--reft_rank`: The rank of the ReFT matrix; defaults to `4`.
+- `--reft_intervention_type`: The type of ReFT intervention, supporting 'NoreftIntervention', 'LoreftIntervention', 'ConsreftIntervention', 'LobireftIntervention', 'DireftIntervention', and 'NodireftIntervention'; defaults to `LoreftIntervention`.
+- `--reft_args`: Other supporting parameters in the ReFT intervention, provided in JSON string format.
+
+### Liger Parameters
+
+- `--use_liger`: Use liger-kernel to train.
+-
 ## PT Parameters
 
 PT parameters inherit from the SFT parameters with some modifications to the default values:
@@ -284,15 +305,16 @@ RLHF parameters are an extension of the sft parameters, with the addition of the
 - `--load_args_from_ckpt_dir`: Whether to read model configuration info from `sft_args.json` file in `ckpt_dir`. Default is `True`.
 - `--load_dataset_config`: This parameter only takes effect when `--load_args_from_ckpt_dir true`. I.e. whether to read dataset related configuration from `sft_args.json` file in `ckpt_dir`. Default is `False`.
 - `--eval_human`: Whether to evaluate using validation set portion of dataset or manual evaluation. Default is `None`, for intelligent selection, if no datasets (including custom datasets) are passed, manual evaluation will be used. If datasets are passed, dataset evaluation will be used.
-- `--device_map_config_path`: Manually configure the model's device map from a local file, defaults to None.
-- `--device_max_memory`: The max memory of each device can use for `device_map`, `List`, default is `[]`, The number of values must equal to the device count. Like `10GB 10GB`.
+- `--device_map_config`: Default is `None`, see `sft command line arguments` for parameter details.
+- `--device_max_memory`: Default is `[]`, see `sft command line arguments` for parameter details.
 - `--seed`: Default is `42`, see `sft command line arguments` for parameter details.
 - `--dtype`: Default is `'AUTO`, see `sft command line arguments` for parameter details.
+- `--model_kwargs`: Default is `None`, see `sft command line arguments` for parameter details.
 - `--dataset`: Default is `[]`, see `sft command line arguments` for parameter details.
 - `--val_dataset`: Default is `[]`, see `sft command line arguments` for parameter details.
 - `--dataset_seed`: Default is `None`, see `sft command line arguments` for parameter details.
 `--dataset_test_ratio`: Default value is `0.01`. For specific parameter details, refer to the `sft command line arguments`.
-- `--show_dataset_sample`: Represents number of validation set samples to evaluate and display, default is `10`.
+- `--show_dataset_sample`: Represents number of validation set samples to evaluate and display, default is `-1`.
 - `--system`: Default is `None`. See `sft command line arguments` for parameter details.
 - `--tools_prompt`: Default is `react_en`. See `sft command line arguments` for parameter details.
 - `--max_length`: Default is `-1`. See `sft command line arguments` for parameter details.
@@ -309,11 +331,11 @@ RLHF parameters are an extension of the sft parameters, with the addition of the
 - `--bnb_4bit_use_double_quant`: Default is `True`.  See `sft command line arguments` for parameter details. If `quantization_bit` is set to 0, this parameter has no effect.
 - `--bnb_4bit_quant_storage`: Default value `None`.See `sft command line arguments` for parameter details. If `quantization_bit` is set to 0, this parameter has no effect.
 - `--max_new_tokens`: Maximum number of new tokens to generate, default is `2048`.
-- `--do_sample`: Whether to use greedy generation or sampling generation, default is `True`.
-- `--temperature`: Default is `0.3`. This parameter only takes effect when `do_sample` is set to True. This parameter will be used as default value in deployment parameters.
-- `--top_k`: Default is `20`. This parameter only takes effect when `do_sample` is set to True. This parameter will be used as default value in deployment parameters.
-- `--top_p`: Default is `0.7`. This parameter only takes effect when `do_sample` is set to True. This parameter will be used as default value in deployment parameters.
-- `--repetition_penalty`: Default is `1.`. This parameter will be used as default value in deployment parameters.
+- `--do_sample`: Reference document: [https://huggingface.co/docs/transformers/main_classes/text_generation](https://huggingface.co/docs/transformers/main_classes/text_generation). Default is `None`, inheriting the model's generation_config.
+- `--temperature`: Default is `None`, inheriting the model's generation_config. This parameter only takes effect when `do_sample` is set to True. This parameter will be used as default value in deployment parameters.
+- `--top_k`: Default is `None`, inheriting the model's generation_config. This parameter only takes effect when `do_sample` is set to True. This parameter will be used as default value in deployment parameters.
+- `--top_p`: Default is `None`, inheriting the model's generation_config. This parameter only takes effect when `do_sample` is set to True. This parameter will be used as default value in deployment parameters.
+- `--repetition_penalty`: Default is `None`, inheriting the model's generation_config. This parameter will be used as default value in deployment parameters.
 - `--num_beams`: Default is `1`.
 - `--use_flash_attn`: Default is `None`, i.e. 'auto'. See `sft command line arguments` for parameter details.
 - `--ignore_args_error`: Default is `False`, see `sft command line arguments` for parameter details.
@@ -330,6 +352,7 @@ RLHF parameters are an extension of the sft parameters, with the addition of the
 
 
 ### vLLM Parameters
+Reference document: [https://docs.vllm.ai/en/latest/models/engine_args.html](https://docs.vllm.ai/en/latest/models/engine_args.html)
 
 - `--gpu_memory_utilization`: Parameter for initializing vllm engine `EngineArgs`, default is `0.9`. This parameter only takes effect when using vllm. vLLM inference acceleration and deployment can be found in [vLLM Inference Acceleration and Deployment](VLLM-inference-acceleration-and-deployment.md).
 - `--tensor_parallel_size`: Parameter for initializing vllm engine `EngineArgs`, default is `1`. This parameter only takes effect when using vllm.
@@ -343,6 +366,8 @@ RLHF parameters are an extension of the sft parameters, with the addition of the
 
 
 ### lmdeploy Parameters
+Reference document: [https://lmdeploy.readthedocs.io/en/latest/api/pipeline.html#turbomindengineconfig](https://lmdeploy.readthedocs.io/en/latest/api/pipeline.html#turbomindengineconfig)
+
 - `--tp`: Tensor parallelism, a parameter for initializing the lmdeploy engine, default value is `1`.
 - `--cache_max_entry_count`: Parameter to initialize the lmdeploy engine, default value is `0.8`.
 - `--quant_policy`: Quantization of Key-Value Cache, parameters for initializing the lmdeploy engine, default value is `0`, you can set it to 4 or 8.
@@ -355,7 +380,7 @@ export parameters inherit from infer parameters, with the following added parame
 - `--merge_lora`: Default is `False`. This parameter is already defined in InferArguments, not a new parameter. Whether to merge lora weights into base model and save full weights. Weights will be saved in the same level directory as `ckpt_dir`, e.g. `'/path/to/your/vx-xxx/checkpoint-xxx-merged'` directory.
 - `--quant_bits`: Number of bits for quantization. Default is `0`, i.e. no quantization. If you set `--quant_method awq`, you can set this to `4` for 4bits quantization. If you set `--quant_method gptq`, you can set this to `2`,`3`,`4`,`8` for corresponding bits quantization. If quantizing original model, weights will be saved in `f'{args.model_type}-{args.quant_method}-int{args.quant_bits}'` directory. If quantizing fine-tuned model, weights will be saved in the same level directory as `ckpt_dir`, e.g. `f'/path/to/your/vx-xxx/checkpoint-xxx-{args.quant_method}-int{args.quant_bits}'` directory.
 - `--quant_method`: Quantization method, default is `'awq'`. Options are 'awq', 'gptq', 'bnb'.
-- `--dataset`: This parameter is already defined in InferArguments, for export it means quantization dataset. Default is `[]`. More details: including how to customize quantization dataset, can be found in [LLM Quantization Documentation](LLM-quantization.md).
+- `--dataset`: This parameter is already defined in InferArguments, for export it means quantization dataset. Default is `[]`. More details: including how to customize quantization dataset, can be found in [LLM Quantization Documentation](LLM-quantization-and-export.md).
 - `--quant_n_samples`: Quantization parameter, default is `256`. When set to `--quant_method awq`, if OOM occurs during quantization, you can moderately reduce `--quant_n_samples` and `--quant_seqlen`. `--quant_method gptq` generally does not encounter quantization OOM.
 - `--quant_seqlen`: Quantization parameter, default is `2048`.
 - `--quant_batch_size`: Calibrating batch_size，Default `1`.
@@ -387,6 +412,7 @@ The eval parameters inherit from the infer parameters, and additionally include 
 - `--eval_use_cache`: Whether to use already generated evaluation cache, so that previously evaluated results won't be rerun but only the evaluation results regenerated. Default is `False`.
 - `--eval_output_dir`: Output path for evaluation results, default is `eval_outputs` in the current folder.
 - `--eval_batch_size`: Input batch size for evaluation, default is 8.
+- `--eval_nproc`: Concurrent number, a bigger value means a faster evaluation and more cost of GPU memory, default 16. This only takes effects when running multi-modal evaluations.
 - `--deploy_timeout`: The timeout duration for waiting for model deployment before evaluation, default is 60, which means one minute.
 
 ## app-ui Parameters

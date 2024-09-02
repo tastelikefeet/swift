@@ -43,7 +43,7 @@ SWIFT支持**300+ LLM和50+ MLLM**（多模态大模型）的训练(预训练、
 
 SWIFT具有丰富全面的文档，请查看我们的文档网站:
 <p align="center">
-        <a href="https://swift.readthedocs.io/en/latest/">English Documentation</a> &nbsp ｜ &nbsp <a href="https://swift.readthedocs.io/zh-cn/latest/">中文文档</a> &nbsp
+        <a href="https://arxiv.org/abs/2408.05517">论文</a> &nbsp ｜ <a href="https://swift.readthedocs.io/en/latest/">English Documentation</a> &nbsp ｜ &nbsp <a href="https://swift.readthedocs.io/zh-cn/latest/">中文文档</a> &nbsp
 </p>
 
 ## ☎ 用户群
@@ -56,6 +56,14 @@ SWIFT具有丰富全面的文档，请查看我们的文档网站:
 
 
 ## 🎉 新闻
+- 🔥2024.08.30: 支持qwen2-vl系列模型的推理与微调: qwen2-vl-2b-instruct, qwen2-vl-7b-instruct. 最佳实践可以查看[这里](docs/source/Multi-Modal/qwen2-vl最佳实践.md).
+- 🔥2024.08.26: 支持[Liger](https://github.com/linkedin/Liger-Kernel), 该内核支持LLaMA、Qwen、Mistral等模型, 并大幅减少显存使用(10%~60%), 使用`--use_liger true`开启训练.
+- 🔥2024.08.22: 支持[ReFT](https://github.com/stanfordnlp/pyreft), 该tuner可以以LoRA的1/15~1/65的参数量达到和LoRA匹配或更好的效果, 使用`--sft_type reft`开始训练!
+- 🔥2024.08.21: 支持phi3_5-mini-instruct, phi3_5-moe-instruct, phi3_5-vision-instruct. 使用phi3_5-vision-instruct进行Latex OCR微调的最佳实践可以查看[这里](https://github.com/modelscope/ms-swift/issues/1809).
+- 2024.08.21: 支持idefics3-8b-llama3, llava-onevision-qwen2-0_5b-ov, llava-onevision-qwen2-7b-ov, llava-onevision-qwen2-72b-ov.
+- 🔥2024.08.20: 支持使用deepspeed-zero3对多模态大模型进行微调.
+- 2024.08.20: 支持模型: longwriter-glm4-9b, longwriter-llama3_1-8b. 支持数据集: longwriter-6k.
+- 🔥2024.08.12: 🎉 SWIFT论文已经发布到arXiv上，可以点击[这个链接](https://arxiv.org/abs/2408.05517)阅读.
 - 🔥2024.08.12: 支持packing和flash-attention时不污染attention_mask, 使用`--packing`开启。详情见[PR](https://github.com/huggingface/transformers/pull/31629/files).
 - 🔥2024.08.09: 支持qwen2-audio模型的推理与微调. 最佳实践可以查看[这里](https://github.com/modelscope/ms-swift/issues/1653).
 - 🔥2024.08.08: 支持qwen2-math系列模型, 1.5B, 7B, 72B. 使用`swift infer --model_type qwen2-math-1_5b-instruct`进行体验.
@@ -68,6 +76,8 @@ SWIFT具有丰富全面的文档，请查看我们的文档网站:
 - 🔥2024.07.24: 人类偏好对齐算法支持视觉多模态大模型, 包括DPO/ORPO/SimPO/CPO, 训练参考[文档](docs/source/Multi-Modal/人类偏好对齐训练文档.md). 支持数据集RLAIF-V.
 - 🔥2024.07.24: 支持使用megatron对qwen2系列进行CPT和SFT. 可以查看[megatron训练文档](docs/source/LLM/Megatron训练文档.md).
 - 🔥2024.07.24: 支持llama3.1系列模型. 包含8b, 70b, 405b. 支持openbuddy-llama3_1-8b-chat.
+<details><summary>More</summary>
+
 - 2024.07.20: 支持mistral-nemo系列模型. 使用`--model_type mistral-nemo-base-2407`以及`--model_type mistral-nemo-instruct-2407`开始训练和推理.
 - 🔥2024.07.19: 支持[Q-Galore](https://arxiv.org/abs/2407.08296)算法, 该算法可以减少显存使用约60% (qwen-7b-chat, full, 80G -> 35G), 使用命令行:`swift sft --model_type xxx --use_galore true --galore_quantization true`来开始训练!
 - 2024.07.17: 支持InternVL2系列新模型: `model_type`分别为internvl2-1b, internvl2-40b, internvl2-llama3-76b. 最佳实践可以查看[这里](docs/source/Multi-Modal/internvl最佳实践.md).
@@ -81,8 +91,6 @@ SWIFT具有丰富全面的文档，请查看我们的文档网站:
 - 2024.07.04: 支持internlm2_5-7b系列: internlm2_5-7b, internlm2_5-7b-chat, internlm2_5-7b-chat-1m.
 - 2024.07.02: 支持`llava1_6-vicuna-7b-instruct`, `llava1_6-vicuna-13b-instruct`等llava-hf模型. 最佳实践可以查看[这里](docs/source/Multi-Modal/llava最佳实践.md).
 - 🔥2024.06.29: 支持[eval-scope](https://github.com/modelscope/eval-scope)&[open-compass](https://github.com/open-compass/opencompass)评测! 我们支持了包含`BoolQ, ocnli, humaneval, math, ceval, mmlu, gsk8k, ARC_e`等50+标准数据集在内的评测流程, 请查看我们的[评测文档](https://github.com/modelscope/swift/blob/main/docs/source/LLM/LLM评测文档.md)来使用。下个迭代我们会支持多模态评测和Agent评测，记得持续关注我们: )
-<details><summary>More</summary>
-
 - 🔥2024.06.28: 支持**Florence**系列模型: 可以查看[Florence最佳实践](docs/source/Multi-Modal/florence最佳实践.md).
 - 🔥2024.06.28: 支持**Gemma2**系列模型: gemma2-9b, gemma2-9b-instruct, gemma2-27b, gemma2-27b-instruct.
 - 🔥2024.06.18: 支持**DeepSeek-Coder-v2**系列模型! 使用model_type`deepseek-coder-v2-instruct`和`deepseek-coder-v2-lite-instruct`来开启训练和推理.
@@ -101,7 +109,7 @@ SWIFT具有丰富全面的文档，请查看我们的文档网站:
 - 🔥2024.05.17: 支持peft=0.11.0. 同时支持了三个新的tuner方法： `BOFT`, `Vera` 和 `Pissa`. 使用 `--sft_type boft/vera` 开启BOFT或者Vera, 使用 `--init_lora_weights pissa` 以及 `--sft_type lora` 来使用 Pissa.
 - 2024.05.16: 支持Llava-Next (Stronger)系列模型，最佳实践可以查看[这里](https://github.com/modelscope/swift/tree/main/docs/source/Multi-Modal/llava最佳实践.md).
 - 🔥2024.05.13: 支持Yi-1.5系列模型，使用`--model_type yi-1_5-9b-chat`等开始体验
-- 2024.05.11: 支持使用[hqq](https://github.com/mobiusml/hqq)和[eetq](https://github.com/NetEase-FuXi/EETQ)进行qlora训练和量化推理，可以查看[LLM量化文档](https://github.com/modelscope/swift/tree/main/docs/source/LLM/LLM量化文档.md)
+- 2024.05.11: 支持使用[hqq](https://github.com/mobiusml/hqq)和[eetq](https://github.com/NetEase-FuXi/EETQ)进行qlora训练和量化推理，可以查看[LLM量化与导出文档](https://github.com/modelscope/swift/tree/main/docs/source/LLM/LLM量化与导出文档.md)
 - 2024.05.10: 支持序列并行. 先安装`pip install .[seq_parallel]`, 之后在DDP环境中添加`--sequence_parallel_size n`即可使用!
 - 2024.05.08: 支持DeepSeek-V2-Chat模型, 训练参考[这个脚本](https://github.com/modelscope/swift/blob/main/examples/pytorch/llm/scripts/deepseek-v2-chat/lora_ddp_ds3/sft.sh)。支持InternVL-Chat-V1.5-Int8模型，最佳实践参考[这里](https://github.com/modelscope/swift/tree/main/docs/source/Multi-Modal/internvl最佳实践.md).
 - 🔥2024.05.07: 支持**ORPO**训练，使用`swift orpo`来开始训练， 最佳实践可以查看[这里](https://github.com/modelscope/swift/tree/main/docs/source/LLM/ORPO算法最佳实践.md)
@@ -143,7 +151,7 @@ SWIFT具有丰富全面的文档，请查看我们的文档网站:
 - 2024.03.06: 支持AWQ量化模型的训练和推理, 使用[这个Qwen1.5-AWQ模型脚本](https://github.com/modelscope/swift/blob/main/examples/pytorch/llm/scripts/qwen1half_7b_chat_awq/lora/sft.sh)开始训练, 并支持[yi-9b](https://github.com/modelscope/swift/blob/main/examples/pytorch/llm/scripts/yi_9b/lora_zero3)的训练和推理.
 - 🔥2024.02.29: 支持[LLaMA PRO](https://arxiv.org/pdf/2401.02415.pdf), 使用[这个脚本](https://github.com/modelscope/swift/blob/main/examples/pytorch/llm/scripts/yi_6b_chat/llamapro/sft.sh)即可开始训练.
 - 🔥2024.02.29: 支持[LoRA+](https://arxiv.org/pdf/2402.12354.pdf), 使用[这个脚本](https://github.com/modelscope/swift/blob/main/examples/pytorch/llm/scripts/yi_6b_chat/lorap/sft.sh)即可开始训练.
-- 2024.02.25: 支持`swift export`, 对模型进行**AWQ/GPTQ**量化导出, 以及推送ModelScope Hub. 具体可以查看文档: [LLM量化文档](https://github.com/modelscope/swift/blob/main/docs/source/LLM/LLM%E9%87%8F%E5%8C%96%E6%96%87%E6%A1%A3.md).
+- 2024.02.25: 支持`swift export`, 对模型进行**AWQ/GPTQ**量化导出, 以及推送ModelScope Hub. 具体可以查看: [LLM量化与导出文档](https://github.com/modelscope/swift/blob/main/docs/source/LLM/LLM量化与导出文档.md).
 - 2024.02.22: 支持gemma系列: gemma-2b, [gemma-2b-instruct](https://github.com/modelscope/swift/tree/main/examples/pytorch/llm/scripts/gemma_2b_instruct), gemma-7b, gemma-7b-instruct.
 - 2024.02.16: 支持deepseek-math系列: deepseek-math-7b, deepseek-math-7b-instruct, deepseek-math-7b-chat.
 - 🔥2024.02.05: 支持**Qwen1.5**系列模型, 支持的所有Qwen1.5系列模型请查看[模型列表](https://github.com/modelscope/swift/blob/main/docs/source/LLM/%E6%94%AF%E6%8C%81%E7%9A%84%E6%A8%A1%E5%9E%8B%E5%92%8C%E6%95%B0%E6%8D%AE%E9%9B%86.md#%E6%A8%A1%E5%9E%8B). 提供了[qwen1half-7b-chat](https://github.com/modelscope/swift/tree/main/examples/pytorch/llm/scripts/qwen1half_7b_chat), [qwen1half-7b-chat-int8](https://github.com/modelscope/swift/tree/main/examples/pytorch/llm/scripts/qwen1half_7b_chat_int8)微调的脚本.
@@ -174,7 +182,7 @@ SWIFT具有丰富全面的文档，请查看我们的文档网站:
 - 2023.12.18: 支持VLLM进行推理加速.
 - 2023.12.15: 支持deepseek, deepseek-coder系列: deepseek-7b, deepseek-7b-chat, deepseek-67b, deepseek-67b-chat, openbuddy-deepseek-67b-chat, deepseek-coder-1_3b, deepseek-coder-1_3b-instruct, deepseek-coder-6_7b, deepseek-coder-6_7b-instruct, deepseek-coder-33b, deepseek-coder-33b-instruct.
 - 2023.12.13: 支持mistral-7b-instruct-v2, [mixtral-moe-7b](https://github.com/modelscope/swift/tree/main/examples/pytorch/llm/scripts/mixtral_7b_moe), [mixtral-moe-7b-instruct](https://github.com/modelscope/swift/tree/main/examples/pytorch/llm/scripts/mixtral_7b_moe_instruct).
-- 2023.12.09: 支持`freeze_parameters`参数, 作为lora和全参数训练的折中方案. 对应的sh可以查看[full_freeze_ddp](https://github.com/modelscope/swift/tree/main/examples/pytorch/llm/scripts/qwen_7b_chat/full_freeze_ddp). 支持`disable_tqdm`, `lazy_tokenize`, `preprocess_num_proc`参数, 具体可以查看[命令行参数](https://github.com/modelscope/swift/blob/main/docs/source/LLM/命令行参数.md).
+- 2023.12.09: 支持`freeze_parameters_ratio`参数, 作为lora和全参数训练的折中方案. 对应的sh可以查看[full_freeze_ddp](https://github.com/modelscope/swift/tree/main/examples/pytorch/llm/scripts/qwen_7b_chat/full_freeze_ddp). 支持`disable_tqdm`, `lazy_tokenize`, `preprocess_num_proc`参数, 具体可以查看[命令行参数](https://github.com/modelscope/swift/blob/main/docs/source/LLM/命令行参数.md).
 - 2023.12.08: 支持[sus-34b-chat](https://github.com/modelscope/swift/tree/main/examples/pytorch/llm/scripts/sus_34b_chat), 支持yi-6b-200k, yi-34b-200k.
 - 2023.12.07: 支持[Multi-Node DDP训练](https://github.com/modelscope/swift/blob/main/docs/source/LLM/LLM%E5%BE%AE%E8%B0%83%E6%96%87%E6%A1%A3.md#%E4%BD%BF%E7%94%A8cli).
 - 2023.12.05: 支持模型: zephyr-7b-beta-chat, openbuddy-zephyr-7b-chat. 支持数据集: hc3-zh, hc3-en.
@@ -233,14 +241,7 @@ pip install -e '.[llm]'
 
 SWIFT依赖torch>=1.13，建议torch>=2.0.0。
 
-- 方法3：在我们的Docker镜像中使用SWIFT
-
-```shell
-# China-Hangzhou image
-docker pull registry.cn-hangzhou.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.1.0-py310-torch2.1.2-tf2.14.0-1.13.1
-# US-west image
-docker pull registry.us-west-1.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda12.1.0-py310-torch2.1.2-tf2.14.0-1.13.1
-```
+- 方法3：在我们的[Docker镜像](https://www.modelscope.cn/docs/%E7%8E%AF%E5%A2%83%E5%AE%89%E8%A3%85)中使用SWIFT
 
 ## 🚀 快速开始
 
@@ -604,21 +605,25 @@ CUDA_VISIBLE_DEVICES=0 swift deploy \
 
 | 模型类型                                                    | 模型介绍                                                                       | 语言       | 模型大小             | 模型类型             |
 |---------------------------------------------------------|----------------------------------------------------------------------------|----------|------------------|------------------|
-| Qwen-VL                                                 | [通义千问视觉模型](https://github.com/QwenLM)                                      | 中文<br>英文 | 7B<br>包含量化版本     | base模型<br>chat模型 |
+| Qwen-VL<br>Qwen2-VL                        | [通义千问视觉模型](https://github.com/QwenLM)                                      | 中文<br>英文 | 7B<br>包含量化版本     | base模型<br>chat模型 |
 | Qwen-Audio<br>Qwen2-Audio                       | [通义千问语音模型](https://github.com/QwenLM)                                      | 中文<br>英文 | 7B               | base模型<br>chat模型 |
 | YI-VL                                                   | [01AI的YI系列视觉模型](https://github.com/01-ai)                                  | 中文<br>英文 | 6B-34B           | chat模型           |
 | XComposer2<br>XComposer2.5                              | [浦江实验室书生浦语视觉模型](https://github.com/InternLM/InternLM-XComposer)            | 中文<br>英文 | 7B               | chat模型           |
 | DeepSeek-VL                                             | [幻方系列视觉模型](https://github.com/deepseek-ai)                                 | 中文<br>英文 | 1.3B-7B          | chat模型           |
 | MiniCPM-V<br>MiniCPM-V-2<br>MiniCPM-V-2.5<br>MiniCPM-V-2.6               | [OpenBmB MiniCPM视觉模型](https://github.com/OpenBMB/MiniCPM)                  | 中文<br>英文 | 3B-9B            | chat模型           |
 | CogVLM<br>CogAgent<br>CogVLM2<br>CogVLM2-Video<br>GLM4V | [智谱ChatGLM视觉问答和Agent模型](https://github.com/THUDM/)                         | 中文<br>英文 | 9B-19B           | chat模型           |
+| Llava-HF               | [Llava-HF系列模型](https://huggingface.co/llava-hf)                          | 英文       | 0.5B-110B           | chat模型           |
 | Llava1.5<br>Llava1.6                                    | [Llava系列模型](https://github.com/haotian-liu/LLaVA)                          | 英文       | 7B-34B           | chat模型           |
 | Llava-Next<br>Llava-Next-Video                          | [Llava-Next系列模型](https://github.com/LLaVA-VL/LLaVA-NeXT)                   | 中文<br>英文 | 7B-110B          | chat模型           |
 | mPLUG-Owl                                               | [mPLUG-Owl系列模型](https://github.com/X-PLUG/mPLUG-Owl)                       | 英文       | 11B              | chat模型           |
 | InternVL<br>Mini-InternVL<br>InternVL2                  | [InternVL](https://github.com/OpenGVLab/InternVL)                          | 中文<br>英文 | 1B-40B<br>包含量化版本 | chat模型           |
-| Llava-llama3                                            | [xtuner](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-transformers) | 英文       | 8B               | chat model       |
-| Phi3-Vision                                             | 微软                                                                         | 英文       | 4B               | chat model       |
-| PaliGemma                                               | Google                                                                     | 英文       | 3B               | chat model       |
-| Florence                                                | 微软                                                                         | 英文       | 0.23B-0.77B      | chat model       |
+| Llava-llama3                                            | [xtuner](https://huggingface.co/xtuner/llava-llama-3-8b-v1_1-transformers) | 英文       | 8B               | chat模型       |
+| Phi3-Vision                                             | 微软                                                                         | 英文       | 4B               | chat模型       |
+| PaliGemma                                               | Google                                                                     | 英文       | 3B               | chat模型       |
+| Florence                                                | 微软                                                                         | 英文       | 0.23B-0.77B      | chat模型       |
+| Idefics3                                | [HuggingFaceM4](https://huggingface.co/HuggingFaceM4)                               | 英文       | 8B      | chat模型       |
+
+
 
 #### 扩散模型
 
@@ -711,11 +716,14 @@ CUDA_VISIBLE_DEVICES=0 swift deploy \
 ## 📎 引用
 
 ```bibtex
-@Misc{swift,
-  title = {SWIFT:Scalable lightWeight Infrastructure for Fine-Tuning},
-  author = {The ModelScope Team},
-  howpublished = {\url{https://github.com/modelscope/swift}},
-  year = {2024}
+@misc{zhao2024swiftascalablelightweightinfrastructure,
+      title={SWIFT:A Scalable lightWeight Infrastructure for Fine-Tuning},
+      author={Yuze Zhao and Jintao Huang and Jinghan Hu and Xingjun Wang and Yunlin Mao and Daoze Zhang and Zeyinzi Jiang and Zhikai Wu and Baole Ai and Ang Wang and Wenmeng Zhou and Yingda Chen},
+      year={2024},
+      eprint={2408.05517},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2408.05517},
 }
 ```
 

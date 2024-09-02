@@ -21,7 +21,7 @@ from transformers.utils import is_torch_bf16_gpu_available, is_torch_cuda_availa
 from transformers.utils.versions import require_version
 
 from swift.hub import HubApi, ModelScopeConfig
-from swift.trainers import Seq2SeqTrainingArguments
+from swift.trainers import LOSS_MAPPING, Seq2SeqTrainingArguments
 from swift.tuners import Swift
 from swift.utils import (add_version_to_work_dir, get_dist_setting, get_logger, get_pai_tensorboard_dir, is_dist,
                          is_local_master, is_mp, is_pai_training_job, use_torchacc)
@@ -32,17 +32,43 @@ from .media import MediaTag
 from .model import (MODEL_MAPPING, dtype_mapping, get_additional_saved_files, get_default_lora_target_modules,
                     get_default_template_type)
 from .template import TEMPLATE_MAPPING
-from .utils import is_lmdeploy_available, is_quant_model, is_vllm_available
+from .utils import is_liger_available, is_lmdeploy_available, is_quant_model, is_vllm_available
 
 logger = get_logger()
 DATASET_TYPE = Union[HfDataset, HfIterableDataset]
 
 
 def is_adapter(sft_type: str) -> bool:
-    return sft_type in {'lora', 'longlora', 'adalora', 'ia3', 'llamapro', 'adapter', 'vera', 'boft', 'fourierft'}
+    return sft_type in {
+        'lora', 'longlora', 'adalora', 'ia3', 'llamapro', 'adapter', 'vera', 'boft', 'fourierft', 'reft'
+    }
 
 
 class ArgumentsBase:
+
+    def __post_init__(self) -> None:
+        if self.max_length == -1:
+            self.max_length = None
+        model_kwargs = self.model_kwargs
+        if model_kwargs is None:
+            model_kwargs = {}
+        if isinstance(model_kwargs, str):
+            model_kwargs = json.loads(model_kwargs)
+        for k, v in model_kwargs.items():
+            k = k.upper()
+            os.environ[k] = str(v)
+
+        if isinstance(self.device_map_config, str):
+            if os.path.exists(self.device_map_config):  # local path
+                with open(self.device_map_config, 'r') as f:
+                    self.device_map_config = json.load(f)
+            else:  # json str
+                self.device_map_config = json.loads(self.device_map_config)
+        _, local_rank, _, local_world_size = get_dist_setting()
+        if local_world_size > 1 and isinstance(self.device_map_config, dict) and local_rank > 0:
+            for k, v in self.device_map_config.items():
+                if isinstance(v, int):
+                    self.device_map_config[k] += local_rank
 
     @classmethod
     def _check_path(cls,
@@ -66,16 +92,14 @@ class ArgumentsBase:
             value = res
         return value
 
-    @staticmethod
-    def _is_multimodal(model_type: Optional[str] = None) -> bool:
+    def _is_multimodal(self, model_type: Optional[str] = None) -> bool:
         if model_type is None:
             return False
         model_info = MODEL_MAPPING[model_type]
         tags = model_info.get('tags') or []
         return 'multi-modal' in tags
 
-    @staticmethod
-    def _is_vision(model_type: Optional[str] = None) -> bool:
+    def _is_vision(self, model_type: Optional[str] = None) -> bool:
         if model_type is None:
             return False
         model_info = MODEL_MAPPING[model_type]
@@ -111,13 +135,6 @@ class ArgumentsBase:
     def handle_generation_config(self: Union['SftArguments', 'InferArguments']) -> None:
         if self.temperature == 0:
             self.do_sample = False
-        if self.do_sample is False:
-            # fix warning
-            self.temperature = 1.
-            self.top_p = 1.
-            self.top_k = 50
-            logger.info('Due to do_sample=False, the following settings are applied: args.temperature: '
-                        f'{self.temperature}, args.top_p: {self.top_p}, args.top_k: {self.top_k}.')
 
     def select_dtype(self: Union['SftArguments', 'InferArguments']) -> Tuple[Optional[Dtype], bool, bool]:
         if not is_torch_cuda_available() and not is_torch_npu_available():
@@ -274,6 +291,8 @@ class ArgumentsBase:
             self.dataset += self.custom_train_dataset_path
         if len(self.custom_val_dataset_path) > 0:
             self.val_dataset += self.custom_val_dataset_path
+        if self.device_map_config_path is not None:
+            self.device_map_config = self.device_map_config_path
 
         if isinstance(self, InferArguments):
             if self.merge_lora_and_save is not None:
@@ -286,6 +305,20 @@ class ArgumentsBase:
             if self.server_port is not None:
                 self.port = self.server_port
         if isinstance(self, SftArguments):
+            log_freeze_warning = False
+            try:
+                if isinstance(self.freeze_parameters, (int, float)):
+                    log_freeze_warning = True
+                elif isinstance(self.freeze_parameters, list) and len(self.freeze_parameters) == 1:
+                    self.freeze_parameters = float(self.freeze_parameters[0])
+                    log_freeze_warning = True
+            except Exception:
+                pass
+            if log_freeze_warning:
+                logger.warning(f'please use `--freeze_parameters_ratio {self.freeze_parameters}`')
+                self.freeze_parameters_ratio = self.freeze_parameters
+                self.freeze_parameters = []
+
             if isinstance(self.train_dataset_mix_ds, str):
                 self.train_dataset_mix_ds = [self.train_dataset_mix_ds]
             if self.only_save_model is not None:
@@ -324,6 +357,11 @@ class ArgumentsBase:
                 self.modules_to_save = self.lora_modules_to_save
             if self.lora_target_regex:
                 self.target_regex = self.lora_target_regex
+
+        if getattr(self, 'push_hub_strategy', None):
+            self.hub_strategy = self.push_hub_strategy
+            if self.hub_strategy in ('push_last', 'push_best'):
+                self.hub_strategy = 'every_save'
 
     def handle_custom_dataset_info(self: Union['SftArguments', 'InferArguments']):
         if self.custom_dataset_info is None:
@@ -541,8 +579,8 @@ class ArgumentsBase:
             if key in {'dataset', 'val_dataset'} and len(value) > 0:
                 continue
             if key in {
-                    'dataset_test_ratio', 'system', 'quant_method', 'model_id_or_path', 'custom_register_path',
-                    'custom_dataset_info', 'dataset_seed'
+                    'system', 'quant_method', 'model_id_or_path', 'custom_register_path', 'custom_dataset_info',
+                    'dataset_seed'
             } and value is not None:
                 continue
             if key in {'template_type', 'dtype'} and value != 'AUTO':
@@ -564,9 +602,11 @@ class SftArguments(ArgumentsBase):
 
     full_determinism: bool = False
 
-    sft_type: Literal['lora', 'full', 'longlora', 'adalora', 'ia3', 'llamapro', 'adapter', 'vera', 'boft',
-                      'fourierft'] = 'lora'
-    freeze_parameters: float = 0.  # 0 ~ 1
+    sft_type: Literal['lora', 'full', 'longlora', 'adalora', 'ia3', 'llamapro', 'adapter', 'vera', 'boft', 'fourierft',
+                      'reft'] = 'lora'
+    freeze_parameters: List[str] = field(default_factory=list)
+    freeze_vit: bool = False
+    freeze_parameters_ratio: float = 0.  # 0 ~ 1
     additional_trainable_parameters: List[str] = field(default_factory=list)
     tuner_backend: Literal['swift', 'peft', 'unsloth'] = 'peft'
     template_type: str = field(
@@ -576,6 +616,7 @@ class SftArguments(ArgumentsBase):
     ddp_backend: Optional[Literal['nccl', 'gloo', 'mpi', 'ccl', 'hccl']] = None
     ddp_find_unused_parameters: Optional[bool] = None
     ddp_broadcast_buffers: Optional[bool] = None
+    ddp_timeout: int = 1800
 
     seed: int = 42
     resume_from_checkpoint: Optional[str] = None
@@ -589,6 +630,10 @@ class SftArguments(ArgumentsBase):
     pp: int = 1
     min_lr: Optional[float] = None
     sequence_parallel: bool = False
+
+    # multimodal
+    model_kwargs: Optional[str] = None
+    loss_name: Optional[str] = field(default=None, metadata={'help': f'loss_func choices: {list(LOSS_MAPPING.keys())}'})
 
     # dataset_id or dataset_name or dataset_path or ...
     dataset: List[str] = field(
@@ -711,8 +756,20 @@ class SftArguments(ArgumentsBase):
     lisa_activated_layers: int = 0
     lisa_step_interval: int = 20
 
+    # reft
+    reft_layer_key: Optional[str] = None
+    reft_layers: Optional[List[int]] = None
+    reft_rank: int = 4
+    reft_intervention_type: Literal['NoreftIntervention', 'LoreftIntervention', 'ConsreftIntervention',
+                                    'LobireftIntervention', 'DireftIntervention',
+                                    'NodireftIntervention'] = 'LoreftIntervention'
+    reft_args: Optional[str] = None
+
+    # use_liger
+    use_liger: bool = False
+
     gradient_checkpointing: Optional[bool] = None
-    # e.g. 'default-zero3', 'default-zero2', 'ds_config/zero2.json', 'zero3-offload'
+    # e.g. 'default-zero3', 'default-zero2', 'ds_config/zero2.json', 'zero2-offload', 'zero3-offload'
     deepspeed: Optional[str] = None
     batch_size: int = 1
     eval_batch_size: Optional[int] = None
@@ -736,7 +793,7 @@ class SftArguments(ArgumentsBase):
 
     eval_steps: Optional[int] = None  # full: 200, other: 50
     save_steps: Optional[int] = None
-    save_only_model: Optional[bool] = None
+    save_only_model: bool = False
     save_total_limit: int = 2  # save last and best. -1: all checkpoints
     logging_steps: int = 5
     acc_steps: int = 1
@@ -752,7 +809,7 @@ class SftArguments(ArgumentsBase):
     hub_token: Optional[str] = field(
         default=None, metadata={'help': 'SDK token can be found in https://modelscope.cn/my/myaccesstoken'})
     hub_private_repo: bool = False
-    push_hub_strategy: Literal['end', 'push_best', 'push_last', 'checkpoint', 'all_checkpoints'] = 'push_best'
+    hub_strategy: Literal['end', 'every_save', 'checkpoint', 'all_checkpoints'] = 'every_save'
 
     # other
     test_oom_error: bool = field(
@@ -782,16 +839,16 @@ class SftArguments(ArgumentsBase):
     custom_register_path: Optional[str] = None  # .py
     custom_dataset_info: Optional[str] = None  # .json
 
-    device_map_config_path: Optional[str] = None
+    device_map_config: Optional[str] = None
     device_max_memory: List[str] = field(default_factory=list)
 
     # generation config
     max_new_tokens: int = 2048
-    do_sample: bool = True
-    temperature: float = 0.3
-    top_k: int = 20
-    top_p: float = 0.7
-    repetition_penalty: float = 1.
+    do_sample: Optional[bool] = None
+    temperature: Optional[float] = None
+    top_k: Optional[int] = None
+    top_p: Optional[float] = None
+    repetition_penalty: Optional[float] = None
     num_beams: int = 1
 
     # fsdp option
@@ -835,6 +892,8 @@ class SftArguments(ArgumentsBase):
 
     custom_train_dataset_path: List[str] = field(default_factory=list)
     custom_val_dataset_path: List[str] = field(default_factory=list)
+    device_map_config_path: Optional[str] = None
+    push_hub_strategy: Optional[Literal['end', 'push_best', 'push_last', 'checkpoint', 'all_checkpoints']] = None
 
     def _prepare_target_modules(self, target_modules) -> Union[List[str], str]:
         if isinstance(target_modules, str):
@@ -879,7 +938,10 @@ class SftArguments(ArgumentsBase):
         return modules_to_save
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         self.handle_compatibility()
+        if self.preprocess_num_proc and self.preprocess_num_proc > 1:
+            os.environ['DATASET_MAP_NPROC'] = str(self.preprocess_num_proc)
         if len(self.val_dataset) > 0:
             self.dataset_test_ratio = 0.0
             logger.info('Using val_dataset, ignoring dataset_test_ratio')
@@ -889,7 +951,8 @@ class SftArguments(ArgumentsBase):
         deepspeed_mapping = {
             'default-zero2': 'zero2.json',
             'default-zero3': 'zero3.json',
-            'zero3-offload': 'zero3_offload.json'
+            'zero2-offload': 'zero2_offload.json',
+            'zero3-offload': 'zero3_offload.json',
         }
         for ds_name, ds_config in deepspeed_mapping.items():
             if self.deepspeed == ds_name:
@@ -960,9 +1023,10 @@ class SftArguments(ArgumentsBase):
             logger.warning('Currently, only full parameter is supported. Setting args.sft_type: "full"')
             self.sft_type = 'full'
 
+        model_info = MODEL_MAPPING[self.model_type]
         if is_adapter(self.sft_type):
-            assert self.freeze_parameters == 0., (
-                'lora does not support `freeze_parameters`, please set `--sft_type full`')
+            assert self.freeze_parameters_ratio == 0., (
+                'lora does not support `freeze_parameters_ratio`, please set `--sft_type full`')
             assert len(self.additional_trainable_parameters) == 0, (
                 'lora does not support `additional_trainable_parameters`, please set `--sft_type full`')
             if is_quant_model(self.model_type):
@@ -970,15 +1034,18 @@ class SftArguments(ArgumentsBase):
                     f'{self.model_type} is already a quantized model and does not need to be quantized again.')
             if self.learning_rate is None:
                 self.learning_rate = 1e-4
-            if self.save_only_model is None:
-                if self.deepspeed is not None and version.parse(transformers.__version__) < version.parse('4.37'):
-                    self.save_only_model = True
-                else:
-                    self.save_only_model = False
             if self.eval_steps is None:
                 self.eval_steps = 50
         elif self.sft_type == 'full':
-            assert 0 <= self.freeze_parameters <= 1
+            if self.freeze_vit:
+                from swift.utils.module_mapping import MODEL_KEYS_MAPPING
+                lora_target_modules = model_info.get('lora_target_modules')
+                vision_tower = None
+                if isinstance(lora_target_modules, str):
+                    vision_tower = MODEL_KEYS_MAPPING[lora_target_modules].vision_tower
+                if vision_tower is not None:
+                    self.freeze_parameters.append(vision_tower)
+            assert 0 <= self.freeze_parameters_ratio <= 1
             assert self.quantization_bit == 0, 'Full parameter fine-tuning does not support quantization.'
             assert self.dtype != 'fp16', ("Fine-tuning with dtype=='fp16' can lead to NaN issues. "
                                           'Please use fp32+AMP or bf16 to perform full parameter fine-tuning.')
@@ -986,8 +1053,6 @@ class SftArguments(ArgumentsBase):
                 self.additional_trainable_parameters = [self.additional_trainable_parameters]
             if self.learning_rate is None:
                 self.learning_rate = 1e-5
-            if self.save_only_model is None:
-                self.save_only_model = True
             if self.eval_steps is None:
                 self.eval_steps = 200
         else:
@@ -999,6 +1064,12 @@ class SftArguments(ArgumentsBase):
 
         if self.save_steps is None:
             self.save_steps = self.eval_steps
+
+        if self.use_liger:
+            assert is_liger_available(), 'use_liger requires liger_kernels, try `pip install liger-kernel`'
+            if self.use_loss_scale:
+                logger.warn('use_liger is not compatible with `use_loss_scale`, setting to False...')
+                self.use_loss_scale = False
 
         # compatibility
         if self.quantization_bit > 0 and self.quant_method is None:
@@ -1026,8 +1097,6 @@ class SftArguments(ArgumentsBase):
                 self.eval_batch_size = self.batch_size
         if self.save_total_limit == -1:
             self.save_total_limit = None
-        if self.max_length == -1:
-            self.max_length = None
 
         if self.deepspeed is not None:
             if is_mp():
@@ -1060,7 +1129,6 @@ class SftArguments(ArgumentsBase):
             logger.info(f'Setting args.dataloader_pin_memory: {self.dataloader_pin_memory}')
         if 'qwen-audio' in self.model_type:
             assert self.preprocess_num_proc == 1 or self.lazy_tokenize, 'not support'
-        model_info = MODEL_MAPPING[self.model_type]
         support_gradient_checkpointing = model_info.get('support_gradient_checkpointing', True)
         if self.gradient_checkpointing is None:
             self.gradient_checkpointing = support_gradient_checkpointing
@@ -1151,7 +1219,7 @@ class SftArguments(ArgumentsBase):
             adam_epsilon=self.adam_epsilon,
             hub_model_id=self.hub_model_id,
             hub_private_repo=self.hub_private_repo,
-            push_hub_strategy=self.push_hub_strategy,
+            hub_strategy=self.hub_strategy,
             hub_token=self.hub_token,
             push_to_hub=self.push_to_hub,
             resume_from_checkpoint=self.resume_from_checkpoint,
@@ -1175,10 +1243,12 @@ class SftArguments(ArgumentsBase):
             fsdp_config=self.fsdp_config,
             dataloader_drop_last=self.dataloader_drop_last,
             seed=self.seed,
+            loss_name=self.loss_name,
             **kwargs)
 
         training_args.ddp_find_unused_parameters = self.ddp_find_unused_parameters
         training_args.ddp_broadcast_buffers = self.ddp_broadcast_buffers
+        training_args.ddp_timeout = self.ddp_timeout
         if is_dist() and training_args.ddp_find_unused_parameters is None:
             if self.gradient_checkpointing:
                 training_args.ddp_find_unused_parameters = False
@@ -1262,6 +1332,9 @@ class InferArguments(ArgumentsBase):
     seed: int = 42
     dtype: Literal['bf16', 'fp16', 'fp32', 'AUTO'] = 'AUTO'
 
+    # multimodal
+    model_kwargs: Optional[str] = None
+
     # dataset_id or dataset_name or dataset_path or ...
     dataset: List[str] = field(
         default_factory=list, metadata={'help': f'dataset choices: {list(DATASET_MAPPING.keys())}'})
@@ -1269,7 +1342,7 @@ class InferArguments(ArgumentsBase):
         default_factory=list, metadata={'help': f'dataset choices: {list(DATASET_MAPPING.keys())}'})
     dataset_seed: Optional[int] = None
     dataset_test_ratio: float = 0.01
-    show_dataset_sample: int = 10
+    show_dataset_sample: int = -1
     save_result: bool = True
     system: Optional[str] = None
     tools_prompt: Literal['react_en', 'react_zh', 'toolbench'] = 'react_en'
@@ -1291,11 +1364,11 @@ class InferArguments(ArgumentsBase):
     bnb_4bit_quant_storage: Optional[str] = None
 
     max_new_tokens: int = 2048
-    do_sample: bool = True
-    temperature: float = 0.3
-    top_k: int = 20
-    top_p: float = 0.7
-    repetition_penalty: float = 1.
+    do_sample: Optional[bool] = None
+    temperature: Optional[float] = None
+    top_k: Optional[int] = None
+    top_p: Optional[float] = None
+    repetition_penalty: Optional[float] = None
     num_beams: int = 1
     stop_words: List[str] = field(default_factory=list)
 
@@ -1314,7 +1387,7 @@ class InferArguments(ArgumentsBase):
     local_repo_path: Optional[str] = None
     custom_register_path: Optional[str] = None  # .py
     custom_dataset_info: Optional[str] = None  # .json
-    device_map_config_path: Optional[str] = None
+    device_map_config: Optional[str] = None
     device_max_memory: List[str] = field(default_factory=list)
     # None: use env var `MODELSCOPE_API_TOKEN`
     hub_token: Optional[str] = field(
@@ -1347,8 +1420,10 @@ class InferArguments(ArgumentsBase):
     custom_train_dataset_path: List[str] = field(default_factory=list)
     custom_val_dataset_path: List[str] = field(default_factory=list)
     vllm_lora_modules: List[str] = None
+    device_map_config_path: Optional[str] = None
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.ckpt_dir is not None and not self.check_ckpt_dir_correct(self.ckpt_dir):
             logger.warning(f'The checkpoint dir {self.ckpt_dir} passed in is invalid, please make sure'
                            'the dir contains a `configuration.json` file.')
@@ -1405,8 +1480,6 @@ class InferArguments(ArgumentsBase):
 
         self.bnb_4bit_compute_dtype, self.load_in_4bit, self.load_in_8bit = self.select_bnb()
 
-        if self.max_length == -1:
-            self.max_length = None
         if self.overwrite_generation_config is None:
             if self.ckpt_dir is None:
                 self.overwrite_generation_config = False
@@ -1455,7 +1528,7 @@ class InferArguments(ArgumentsBase):
                 or self.infer_backend == 'pt' and isinstance(self, DeployArguments) and self.sft_type == 'lora'):
             assert self.ckpt_dir is not None
             self.lora_modules.append(f'default-lora={self.ckpt_dir}')
-            self.lora_request_list = _parse_lora_modules(self.lora_modules, self.infer_backend == 'vllm')
+            self.lora_request_list, self.use_dora = _parse_lora_modules(self.lora_modules, self.infer_backend == 'vllm')
 
         template_info = TEMPLATE_MAPPING[self.template_type]
         if self.num_beams != 1:
@@ -1504,9 +1577,6 @@ class DeployArguments(InferArguments):
     verbose: bool = True  # Whether to log request_info
     log_interval: int = 10  # Interval for printing global statistics
 
-    def __post_init__(self):
-        super().__post_init__()
-
 
 @dataclass
 class EvalArguments(InferArguments):
@@ -1527,7 +1597,8 @@ class EvalArguments(InferArguments):
     deploy_timeout: int = 60
 
     do_sample: bool = False  # Note: for evaluation default is False
-    temperature: float = 0.0
+    temperature: float = 0.
+    eval_nproc: int = 16
 
     def __post_init__(self):
         super().__post_init__()
@@ -1562,6 +1633,12 @@ class EvalArguments(InferArguments):
     def handle_infer_backend(self) -> None:
         if self.eval_url is None:
             super().handle_infer_backend()
+
+    def _is_multimodal(self, model_type: Optional[str] = None) -> bool:
+        return False
+
+    def _is_vision(self, model_type: Optional[str] = None) -> bool:
+        return False
 
 
 @dataclass
@@ -1786,7 +1863,7 @@ def swift_to_peft_format(lora_checkpoint_path: str) -> str:
     return lora_checkpoint_path
 
 
-def _parse_lora_modules(lora_modules: List[str], use_vllm: bool) -> List[Any]:
+def _parse_lora_modules(lora_modules: List[str], use_vllm: bool) -> Tuple[List[Any], bool]:
     VllmLoRARequest = None
     if use_vllm:
         try:
@@ -1803,8 +1880,18 @@ def _parse_lora_modules(lora_modules: List[str], use_vllm: bool) -> List[Any]:
 
     LoRARequest = VllmLoRARequest if use_vllm else PtLoRARequest
     lora_request_list = []
+    use_dora_list = []
     for i, lora_module in enumerate(lora_modules):
         lora_name, lora_local_path = lora_module.split('=')
         lora_local_path = swift_to_peft_format(lora_local_path)
+        with open(os.path.join(lora_local_path, 'adapter_config.json'), 'r') as f:
+            _json = json.load(f)
+            use_dora_list.append(_json.get('use_dora', False))
         lora_request_list.append(LoRARequest(lora_name, i + 1, lora_local_path))
-    return lora_request_list
+    if any(use_dora_list) and len(lora_modules) > 1:
+        raise ValueError('Dora does not support inference with other loras')
+    elif not any(use_dora_list):
+        use_dora = False
+    else:
+        use_dora = True
+    return lora_request_list, use_dora

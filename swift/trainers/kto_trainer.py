@@ -10,7 +10,8 @@ from trl.trainer import kto_trainer
 from swift.llm.utils.template import Context, History, Template
 from swift.utils import get_logger
 from .callback import DefaultFlowCallbackNew, PrinterCallbackNew, ProgressCallbackNew
-from .mixin import PushToMsHubMixin, SwiftMixin
+from .mixin import SwiftMixin
+from .push_to_ms import PushToMsHubMixin
 
 logger = get_logger()
 
@@ -75,7 +76,8 @@ def encode_batch(batch: Dict[str, List[Any]], template: Template):
                                       response=r,
                                       round0=i)
     template._concat_context_list(template.prompt, res_context_list, compute_loss_idx, query=query, round0=len(history))
-    res_context_list, compute_loss_idx = template._simplify_context_list(res_context_list, compute_loss_idx)
+    res_context_list, compute_loss_idx = template._simplify_context_list(
+        res_context_list, compute_loss_idx, example=batch)
     prompt = ''.join(res_context_list)
 
     return {'prompt': prompt, 'completion': batch['response'], 'label': batch['label']}
@@ -129,7 +131,6 @@ class KTOTrainer(PushToMsHubMixin, SwiftMixin, HFKTOTrainer):
     @staticmethod
     def stat_dataset(llm_dataset, is_encoder_decoder: bool = False) -> Any:
         _token_len = []
-        from datasets import Dataset as HfDataset
         from swift.utils.np_utils import stat_array
         if isinstance(llm_dataset, HfDataset):
             prompt_input_ids = llm_dataset['prompt_input_ids']

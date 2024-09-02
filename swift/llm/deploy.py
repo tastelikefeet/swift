@@ -2,12 +2,13 @@
 import asyncio
 import inspect
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from http import HTTPStatus
 from threading import Thread
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import json
 import torch
@@ -24,7 +25,7 @@ from .utils import (TEMPLATE_MAPPING, ChatCompletionMessageToolCall, ChatComplet
                     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice, ChatCompletionStreamResponse,
                     ChatMessage, CompletionRequest, CompletionResponse, CompletionResponseChoice,
                     CompletionResponseStreamChoice, CompletionStreamResponse, DeltaMessage, DeployArguments, Function,
-                    Model, ModelList, Template, UsageInfo, compat_openai, decode_base64, inference, inference_stream,
+                    Model, ModelList, Template, UsageInfo, compat_openai, inference, inference_stream, is_quant_model,
                     messages_join_observation, messages_to_history, random_uuid, set_generation_config)
 
 logger = get_logger()
@@ -100,7 +101,9 @@ async def get_available_models():
     return ModelList(data=data)
 
 
-async def check_length(request: Union[ChatCompletionRequest, CompletionRequest], input_ids: List[int]) -> Optional[str]:
+async def check_length(request: Union[ChatCompletionRequest, CompletionRequest],
+                       input_ids: List[int],
+                       strict: bool = False) -> Optional[str]:
     global llm_engine, model, _args
     if _args.infer_backend in {'vllm', 'lmdeploy'}:
         max_model_len = llm_engine.max_model_len
@@ -112,14 +115,19 @@ async def check_length(request: Union[ChatCompletionRequest, CompletionRequest],
         max_model_len = 8192
         logger.warning(
             'The current model is unable to retrieve `max_model_len`. It is set to the default value of 8192.')
+    max_new_tokens = max_model_len - num_tokens
     if max_tokens is None:
-        max_tokens = max_model_len - num_tokens
-        request.max_tokens = max_tokens
-    if max_tokens + num_tokens > max_model_len:
-        error_msg = (f'Your prompt has {num_tokens} tokens, and you have set the `max_tokens` to {max_tokens}, '
-                     f'but the maximum model length supported is {max_model_len}. '
-                     'Please reduce the number of tokens in the prompt or the `max_tokens`.')
-        return error_msg
+        request.max_tokens = max_new_tokens
+    elif max_new_tokens < max_tokens:
+        if strict:
+            error_msg = (f'Your prompt has {num_tokens} tokens, and you have set the `max_tokens` to {max_tokens}, '
+                         f'but the maximum model length supported is {max_model_len}. '
+                         'Please reduce the number of tokens in the prompt or the `max_tokens`.')
+            return error_msg
+        else:
+            logger.warning(f'max_model_len({max_model_len}) - num_tokens({num_tokens}) < max_tokens({max_tokens}). '
+                           f'Setting max_tokens: {max_model_len - num_tokens}')
+            request.max_tokens = max_new_tokens
 
 
 async def check_model(request: Union[ChatCompletionRequest, CompletionRequest]) -> Optional[str]:
@@ -135,6 +143,18 @@ def is_generation_template(template_type: str) -> bool:
     template_info = TEMPLATE_MAPPING[template_type]
     is_generation = template_info.get('is_generation', False)
     return is_generation
+
+
+def logger_request(request_info: Dict[str, Any]) -> None:
+    request_info = str(request_info)
+    pattern = r'<(?:img|audio|video)>(.+?)</(?:img|audio|video)>'
+    match_iter = re.finditer(pattern, request_info)
+    for match_ in match_iter:
+        base64_str = match_.group(1)
+        if len(base64_str) >= 1000:
+            base64_str = f'<<<base64:{base64_str[:50]}..>>>'
+        request_info = f'{request_info[:match_.start(1)]}{base64_str}{request_info[match_.end(1):]}'
+    logger.info(request_info)
 
 
 async def _prepare_request(request: Union[ChatCompletionRequest, CompletionRequest], raw_request: Request):
@@ -166,7 +186,6 @@ async def _prepare_request(request: Union[ChatCompletionRequest, CompletionReque
         messages = request.messages
         if _args.is_multimodal:
             compat_openai(messages, request)
-            messages = decode_base64(messages=messages)['messages']
         # For agent, check if response is endwith observations and join tool observation
         messages_join_observation(messages)
         example = messages_to_history(messages)
@@ -188,8 +207,6 @@ async def _prepare_request(request: Union[ChatCompletionRequest, CompletionReque
                 f'the model `{model_or_engine.model_type}` is in chat format. '
                 'Please use the `chat.completions` API.')
         prompt = request.prompt
-        if _args.is_multimodal:
-            prompt = decode_base64(prompt=prompt)['prompt']
         example = {'query': prompt}
         request_id = f'cmpl-{random_uuid()}'
         _request['prompt'] = prompt
@@ -254,7 +271,7 @@ async def inference_vllm_async(request: Union[ChatCompletionRequest, CompletionR
     request_info['generation_config'] = generation_config
     request_info.update({'stream': request.stream})
     if _args.verbose:
-        logger.info(request_info)
+        logger_request(request_info)
 
     generate_kwargs = {}
     if _args.vllm_enable_lora and request.model != _args.model_type:
@@ -342,10 +359,16 @@ async def inference_vllm_async(request: Union[ChatCompletionRequest, CompletionR
                 completion_tokens=num_generated_tokens,
                 total_tokens=num_prompt_tokens + num_generated_tokens,
             )
+            is_diff = False
+            has_finished = False
             for output in result.outputs:
                 output.delta_text = template.generate_ids_to_response(
                     output.token_ids, output.finished(), return_delta=True, print_idx=print_idx_list[output.index])
                 total_res[output.index] += output.delta_text
+                is_diff |= bool(output.delta_text)
+                has_finished |= output.finish_reason is not None
+            if not is_diff and not has_finished:
+                continue
             if isinstance(request, ChatCompletionRequest):
                 choices = []
                 for output in result.outputs:
@@ -419,7 +442,7 @@ async def inference_lmdeploy_async(request: Union[ChatCompletionRequest, Complet
     request_info['generation_config'] = generation_config
     request_info.update({'stream': request.stream})
     if _args.verbose:
-        logger.info(request_info)
+        logger_request(request_info)
 
     session_id = time.time_ns()
     generator = await llm_engine.get_generator(False, session_id)
@@ -498,12 +521,13 @@ async def inference_lmdeploy_async(request: Union[ChatCompletionRequest, Complet
                 )
                 delta_text = template.generate_ids_to_response(
                     output.token_ids, is_finished, return_delta=True, print_idx=print_idx)
-                total_response += delta_text
 
                 finish_reason = None
                 if output.status.name == 'FINISH':
                     finish_reason = 'stop'
-
+                if not delta_text and finish_reason != 'stop':
+                    continue
+                total_response += delta_text
                 if isinstance(request, ChatCompletionRequest):
                     toolcall = None
                     if finish_reason == 'stop':
@@ -602,11 +626,20 @@ async def inference_pt_async(request: Union[ChatCompletionRequest, CompletionReq
     stop = (_args.stop_words or []) + (getattr(request, 'stop') or [])
     request_info.update({'seed': request.seed, 'stop': stop, 'stream': request.stream})
     if _args.verbose:
-        logger.info(request_info)
+        logger_request(request_info)
 
     adapter_kwargs = {}
     if _args.lora_request_list is not None:
-        if request.model != _args.model_type:
+        if _args.use_dora or is_quant_model(_args.model_type, model) or _args.is_multimodal:
+            if _args.use_dora:
+                error_msg = 'Dora'
+            elif is_quant_model(_args.model_type, model):
+                error_msg = 'GPTQ/AWQ/AQLM model'
+            else:
+                error_msg = 'Multimodal model'
+            if request.model != 'default-lora':
+                return create_error_response(HTTPStatus.BAD_REQUEST, f'{error_msg} only support `default-lora`')
+        elif request.model != _args.model_type:
             adapter_names = None
             for lora_req in _args.lora_request_list:
                 if lora_req.lora_name == request.model:
@@ -692,9 +725,11 @@ async def inference_pt_async(request: Union[ChatCompletionRequest, CompletionReq
                 completion_tokens=num_generated_tokens,
                 total_tokens=num_prompt_tokens + num_generated_tokens,
             )
+            delta_text = response[print_idx:]
+            if not delta_text and not is_finished:
+                continue
+            print_idx = len(response)
             if isinstance(request, ChatCompletionRequest):
-                delta_text = response[print_idx:]
-                print_idx = len(response)
                 toolcall = None
                 if is_finished:
                     action, action_input = split_action_action_input(response)
@@ -714,8 +749,6 @@ async def inference_pt_async(request: Union[ChatCompletionRequest, CompletionReq
                 resp = ChatCompletionStreamResponse(
                     model=request.model, choices=choices, usage=usage_info, id=request_id, created=created_time)
             else:
-                delta_text = response[print_idx:]
-                print_idx = len(response)
                 choices = [CompletionResponseStreamChoice(index=0, text=delta_text, finish_reason=None)]
                 resp = CompletionStreamResponse(
                     model=request.model, choices=choices, usage=usage_info, id=request_id, created=created_time)

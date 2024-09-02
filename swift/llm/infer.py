@@ -203,8 +203,8 @@ def prepare_model_template(args: InferArguments,
         num_beams=args.num_beams,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id)
-    logger.info(f'generation_config: {generation_config}')
     set_generation_config(model, generation_config)
+    logger.info(f'model.generation_config: {model.generation_config}')
 
     if model.max_model_len is None:
         model.max_model_len = args.max_model_len
@@ -216,11 +216,6 @@ def prepare_model_template(args: InferArguments,
                              f'args.max_model_len: {args.max_model_len}, model.max_model_len: {model.max_model_len}')
     # Preparing LoRA
     if is_adapter(args.sft_type) and args.ckpt_dir is not None:
-        if args.lora_request_list is not None and (is_quant_model(args.model_type, model) or args.is_multimodal):
-            # gptq awq does not support lora switching
-            args.lora_request_list = None
-            logger.warning('The current model does not support LoRA switching. '
-                           f'Setting args.lora_request_list: {args.lora_request_list}')
         if isinstance(args, DeployArguments) and args.lora_request_list is not None:
             logger.info(f'args.lora_request_list: {args.lora_request_list}')
             for lora_request in args.lora_request_list:
@@ -290,13 +285,6 @@ def llm_infer(args: InferArguments) -> Dict[str, List[Dict[str, Any]]]:
                             inference_lmdeploy as inference_x)
         llm_engine, template = prepare_lmdeploy_engine_template(args)
     else:
-        device_map = None
-        if args.device_map_config_path is not None:
-            cwd = os.getcwd()
-            config_path = args.device_map_config_path if os.path.isabs(args.device_map_config_path) else os.path.join(
-                cwd, args.device_map_config_path)
-            with open(config_path, 'r') as json_file:
-                device_map = json.load(json_file)
         if args.quant_method == 'hqq':
             from transformers import HqqConfig
             if args.hqq_dynamic_config_path is not None:
@@ -313,7 +301,7 @@ def llm_infer(args: InferArguments) -> Dict[str, List[Dict[str, Any]]]:
         elif args.quant_method == 'eetq':
             from transformers import EetqConfig
             args.quant_config = EetqConfig('int8')
-        model, template = prepare_model_template(args, device_map=device_map)
+        model, template = prepare_model_template(args, device_map=args.device_map_config)
         if args.overwrite_generation_config:
             assert args.ckpt_dir is not None, 'args.ckpt_dir is not specified.'
             model.generation_config.save_pretrained(args.ckpt_dir)
@@ -465,7 +453,7 @@ def llm_infer(args: InferArguments) -> Dict[str, List[Dict[str, Any]]]:
         logger.info(f'val_dataset: {val_dataset}')
 
         if args.verbose is None:
-            if len(val_dataset) >= 100:
+            if len(val_dataset) >= 20:
                 args.verbose = False
             else:
                 args.verbose = True
@@ -586,8 +574,6 @@ def llm_infer(args: InferArguments) -> Dict[str, List[Dict[str, Any]]]:
 
     if jsonl_path is not None:
         logger.info(f'save_result_path: {jsonl_path}')
-    if not args.eval_human and args.show_dataset_sample == 10:  # is default
-        logger.info('You can set `--show_dataset_sample -1` to perform inference on the entire dataset.')
     return {'result': result}
 
 

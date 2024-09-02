@@ -25,7 +25,7 @@ Swift DOCUMENTATION
    LLM/LLM微调文档.md
    LLM/人类偏好对齐训练文档.md
    LLM/LLM评测文档.md
-   LLM/LLM量化文档.md
+   LLM/LLM量化与导出文档.md
    LLM/OLLAMA导出文档.md
    LLM/VLLM推理加速与部署.md
    LLM/LmDeploy推理加速与部署.md
@@ -56,6 +56,7 @@ Swift DOCUMENTATION
    Multi-Modal/vLLM推理加速文档.md
    Multi-Modal/MLLM部署文档.md
    Multi-Modal/qwen-vl最佳实践.md
+   Multi-Modal/qwen2-vl最佳实践.md
    Multi-Modal/qwen-audio最佳实践.md
    Multi-Modal/llava最佳实践.md
    Multi-Modal/llava-video最佳实践.md

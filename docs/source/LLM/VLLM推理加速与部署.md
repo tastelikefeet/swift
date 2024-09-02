@@ -42,7 +42,8 @@ from swift.llm import (
 )
 
 model_type = ModelType.qwen_7b_chat
-llm_engine = get_vllm_engine(model_type)
+model_id_or_path = None
+llm_engine = get_vllm_engine(model_type, model_id_or_path=model_id_or_path)
 template_type = get_default_template_type(model_type)
 template = get_template(template_type, llm_engine.hf_tokenizer)
 # 与`transformers.GenerationConfig`类似的接口
@@ -98,7 +99,8 @@ from swift.llm import (
 )
 if __name__ == '__main__':
     model_type = ModelType.qwen_7b_chat
-    llm_engine = get_vllm_engine(model_type, tensor_parallel_size=2)
+    model_id_or_path = None
+    llm_engine = get_vllm_engine(model_type, model_id_or_path=model_id_or_path, tensor_parallel_size=2)
     template_type = get_default_template_type(model_type)
     template = get_template(template_type, llm_engine.hf_tokenizer)
     # 与`transformers.GenerationConfig`类似的接口
@@ -197,7 +199,6 @@ CUDA_VISIBLE_DEVICES=0 swift export \
     --ckpt_dir 'xxx/vx-xxx/checkpoint-xxx' --merge_lora true
 
 # 使用数据集评估
-# 如果要推理所有数据集样本, 请额外指定`--show_dataset_sample -1`
 CUDA_VISIBLE_DEVICES=0 swift infer \
     --ckpt_dir 'xxx/vx-xxx/checkpoint-xxx-merged' \
     --infer_backend vllm \
@@ -232,6 +233,8 @@ swift使用VLLM作为推理后端, 并兼容openai的API样式.
 服务端的部署命令行参数可以参考: [deploy命令行参数](命令行参数.md#deploy-参数).
 
 客户端的openai的API参数可以参考: https://platform.openai.com/docs/api-reference/introduction.
+
+benchmark测试代码: https://github.com/modelscope/ms-swift/blob/main/scripts/benchmark/deploy.py
 
 ### 原始模型
 #### qwen-7b-chat

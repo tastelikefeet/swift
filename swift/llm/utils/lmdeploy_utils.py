@@ -28,6 +28,28 @@ from .utils import get_max_model_len
 logger = get_logger()
 
 
+@contextmanager
+def _patch_pipeline(tokenizer):
+    _old_from_pretrained = AutoTokenizer.from_pretrained
+
+    @wraps(_old_from_pretrained)
+    def _from_pretrained(self, *args, **kwargs):
+        return tokenizer
+
+    AutoTokenizer.from_pretrained = _from_pretrained
+
+    from lmdeploy.serve import async_engine
+    _old_best_match_model = async_engine.best_match_model
+
+    def _best_match_model(query: str) -> Optional[str]:
+        return tokenizer.model_type
+
+    async_engine.best_match_model = _best_match_model
+    yield
+    AutoTokenizer.from_pretrained = _old_from_pretrained
+    async_engine.best_match_model = _old_best_match_model
+
+
 def get_lmdeploy_engine(
         model_type: str,
         # TODO: https://github.com/InternLM/lmdeploy/issues/1846
@@ -70,15 +92,8 @@ def get_lmdeploy_engine(
         pipeline_kwargs['vision_config'] = vision_config
         logger.info(f'vision_config: {vision_config}')
 
-    _old_from_pretrained = AutoTokenizer.from_pretrained
-
-    @wraps(_old_from_pretrained)
-    def _from_pretrained(self, *args, **kwargs):
-        return tokenizer
-
-    AutoTokenizer.from_pretrained = _from_pretrained
-    lmdeploy_engine = pipeline(model_dir, backend_config=backend_config, **pipeline_kwargs)
-    AutoTokenizer.from_pretrained = _old_from_pretrained  # recover
+    with _patch_pipeline(tokenizer):
+        lmdeploy_engine = pipeline(model_dir, backend_config=backend_config, **pipeline_kwargs)
 
     lmdeploy_engine.model_dir = model_dir
     lmdeploy_engine.model_type = model_type
@@ -102,13 +117,6 @@ def get_lmdeploy_engine(
     return lmdeploy_engine
 
 
-@contextmanager
-def lmdeploy_context(self: Template):
-    self._is_lmdeploy = True
-    yield
-    self._is_lmdeploy = False
-
-
 class LmdeployGenerationConfig(_LmdeployGenerationConfig):
 
     def __init__(
@@ -127,6 +135,9 @@ class LmdeployGenerationConfig(_LmdeployGenerationConfig):
     ) -> None:
         if stop_words is None:
             stop_words = []
+        if max_new_tokens is None:
+            max_new_tokens = 64
+        self._temperature = temperature
         super().__init__(
             max_new_tokens=max_new_tokens,
             temperature=temperature,
@@ -138,6 +149,17 @@ class LmdeployGenerationConfig(_LmdeployGenerationConfig):
             random_seed=random_seed,
             skip_special_tokens=skip_special_tokens,
             **kwargs)
+
+    def __setattr__(self, key: str, value: str) -> None:
+        if key == 'do_sample':
+            assert value in {True, False}
+            super().__setattr__('temperature', self._temperature if value else 0)
+        elif key == 'max_length':
+            raise ValueError('`max_length` is not supported, please use `max_new_tokens` for setting.')
+        else:
+            if key == 'temperature':
+                self._temperature = value
+            super().__setattr__(key, value)
 
 
 def _add_stop_word(stop_words: List[int], token: Union[List[int], int, str, None], tokenizer=None) -> None:
@@ -190,7 +212,7 @@ def _prepare_lmdeploy_request(lmdeploy_engine: Union[AsyncEngine, VLAsyncEngine]
         prog_bar.update()
         return inputs
 
-    with lmdeploy_context(template), concurrent.futures.ThreadPoolExecutor(
+    with template.lmdeploy_context(), concurrent.futures.ThreadPoolExecutor(
             max_workers=min(max_workers, len(request_list))) as executor:
         futures = [executor.submit(_prepare_inputs, request) for request in request_list]
         concurrent.futures.wait(futures)
@@ -433,21 +455,16 @@ def prepare_lmdeploy_engine_template(args: InferArguments) -> Tuple[Union[AsyncE
         model_id_or_path=model_id_or_path)
     tokenizer = lmdeploy_engine.hf_tokenizer
 
-    if not args.do_sample:
-        args.temperature = 0
-
     stop_words = []
     for stop_word in args.stop_words:
         _add_stop_word(stop_words, stop_word, tokenizer=tokenizer)
-    generation_config = LmdeployGenerationConfig(
-        max_new_tokens=args.max_new_tokens,
-        temperature=args.temperature,
-        top_k=args.top_k,
-        top_p=args.top_p,
-        stop_words=stop_words,
-        repetition_penalty=args.repetition_penalty)
-    logger.info(f'generation_config: {generation_config}')
-    lmdeploy_engine.generation_config = generation_config
+    setattr(lmdeploy_engine.generation_config, 'max_new_tokens', args.max_new_tokens)
+    for k in ['temperature', 'do_sample', 'top_k', 'top_p', 'repetition_penalty']:
+        val = getattr(args, k, None)
+        if val is not None:
+            setattr(lmdeploy_engine.generation_config, k, val)
+    logger.info(f'lmdeploy_engine.generation_config: {lmdeploy_engine.generation_config}')
+
     template: Template = get_template(
         args.template_type,
         tokenizer,

@@ -39,7 +39,8 @@ from swift.llm import (
 )
 
 model_type = ModelType.qwen_7b_chat
-llm_engine = get_vllm_engine(model_type)
+model_id_or_path = None
+llm_engine = get_vllm_engine(model_type, model_id_or_path=model_id_or_path)
 template_type = get_default_template_type(model_type)
 template = get_template(template_type, llm_engine.hf_tokenizer)
 # Similar to `transformers.GenerationConfig` interface
@@ -138,7 +139,6 @@ CUDA_VISIBLE_DEVICES=0 swift export \
     --ckpt_dir 'xxx/vx-xxx/checkpoint-xxx' --merge_lora true
 
 # Evaluate using dataset
-# If you want to infer all dataset samples, please additionally specify `--show_dataset_sample -1`.
 CUDA_VISIBLE_DEVICES=0 swift infer \
     --ckpt_dir 'xxx/vx-xxx/checkpoint-xxx-merged' \
     --infer_backend vllm \
@@ -173,6 +173,8 @@ Swift uses VLLM as the inference backend and is compatible with the OpenAI API s
 For server deployment command line arguments, refer to: [deploy command line arguments](Command-line-parameters.md#deploy-Parameters).
 
 For OpenAI API arguments on the client side, refer to: https://platform.openai.com/docs/api-reference/introduction.
+
+Benchmark testing code: https://github.com/modelscope/ms-swift/blob/main/scripts/benchmark/deploy.py
 
 ### Original Models
 #### qwen-7b-chat

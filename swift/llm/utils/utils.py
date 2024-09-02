@@ -77,6 +77,7 @@ def download_dataset(model_id: str, files: List[str], force_download: bool = Fal
 use_hf = strtobool(os.environ.get('USE_HF', 'False'))
 if not use_hf:
     from modelscope import MsDataset
+
     _old_msdataset_load = MsDataset.load
 
     @wraps(_old_msdataset_load)
@@ -236,6 +237,8 @@ class ConstantLengthDataset(IterableDataset):
             sequences = []
             for example in buffer:
                 input, _ = self.template.encode(example)
+                if not input:
+                    continue
                 sequences.append((input, len(input['input_ids'])))
 
             packed_sequences = self.calculate_matched_group(sequences)
@@ -515,10 +518,8 @@ def to_device(inputs: Any, device: Device) -> Any:
         res = []
         for b in inputs:
             res.append(to_device(b, device))
-    elif isinstance(inputs, (int, float, str)) or inputs is None:
-        res = inputs
     else:
-        raise TypeError(f'inputs: {inputs}, {type(inputs)}')
+        res = inputs
     return res
 
 
@@ -598,7 +599,10 @@ def _prepare_inputs(model: PreTrainedModel,
     if 'token_type_ids' in inputs:
         inputs['token_type_ids'] = torch.tensor(inputs['token_type_ids'])[None]
     model.eval()
-
+    if not generation_config.do_sample:
+        generation_config.temperature = 1.
+        generation_config.top_p = 1.
+        generation_config.top_k = 50
     if tokenizer.eos_token_id is not None:
         generation_config.eos_token_id = tokenizer.eos_token_id
     if tokenizer.pad_token_id is not None:
@@ -917,11 +921,12 @@ def set_generation_config(model: Module, generation_config: GenerationConfig) ->
     old_generation_config = getattr(model, 'generation_config', None)
     old_generation_priority_config = ['no_repeat_ngram_size']
     if old_generation_config is not None:
-        for k, v in old_generation_config.__dict__.items():
-            if k in old_generation_priority_config:
-                setattr(generation_config, k, v)
-            if k not in generation_config.__dict__:
-                setattr(generation_config, k, v)
+        for k, old_v in old_generation_config.__dict__.items():
+            if k.startswith('_'):
+                continue
+            v = getattr(generation_config, k, None)
+            if k in old_generation_priority_config or old_v is not None and v is None:
+                setattr(generation_config, k, old_v)
     model.generation_config = generation_config
 
 
@@ -931,6 +936,10 @@ def is_vllm_available():
 
 def is_lmdeploy_available():
     return importlib.util.find_spec('lmdeploy') is not None
+
+
+def is_liger_available():
+    return importlib.util.find_spec('liger_kernel') is not None
 
 
 def is_xtuner_available():
@@ -943,6 +952,10 @@ def is_megatron_available():
 
 def is_unsloth_available() -> bool:
     return importlib.util.find_spec('unsloth') is not None
+
+
+def is_pyreft_available() -> bool:
+    return importlib.util.find_spec('pyreft') is not None
 
 
 def get_time_info(log_history: List[Dict[str, Any]], n_train_samples: Optional[int]) -> Optional[Dict[str, Any]]:
@@ -964,6 +977,15 @@ def get_time_info(log_history: List[Dict[str, Any]], n_train_samples: Optional[i
 class LLMIterableDataset(HfIterableDataset):
 
     def __init__(self, dataset: HfIterableDataset, max_retries=10):
+        super().__init__(
+            dataset._ex_iterable,
+            dataset._info,
+            dataset._split,
+            dataset._formatting,
+            dataset._shuffling,
+            dataset._distributed,
+            dataset._token_per_repo_id,
+        )
         self.dataset = dataset
         self.max_retries = max_retries
         from .dataset import standard_keys
@@ -982,7 +1004,8 @@ class LLMIterableDataset(HfIterableDataset):
                     else:
                         raise ValueError
                 except StopIteration:
-                    return
+                    iterator = iter(self.dataset)
+                    break
                 except Exception as e:
                     retries += 1
                     if retries >= self.max_retries:
@@ -1046,7 +1069,7 @@ def get_rope_scaling(config: PretrainedConfig):
 
 
 if is_ddp_plus_mp():
-    from accelerate.utils.modeling import (get_balanced_memory, infer_auto_device_map)
+    from accelerate.utils.modeling import get_balanced_memory, infer_auto_device_map
 
     @wraps(infer_auto_device_map)
     def _infer_auto_device_map_patch(model: Module,

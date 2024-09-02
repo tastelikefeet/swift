@@ -14,7 +14,7 @@ from transformers import IntervalStrategy, LlamaModel, Cache
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.utils import is_torch_npu_available
-
+from transformers.utils import is_torch_npu_available, strtobool
 from swift.torchacc_utils import patch_acc_model
 from swift.trainers import Seq2SeqTrainer
 from swift.trainers.utils import can_return_loss, find_labels
@@ -261,12 +261,8 @@ def llm_sft(args: SftArguments) -> Dict[str, Any]:
         model_kwargs = {'device_map': None}
     elif is_torch_npu_available():
         model_kwargs = {'device_map': args.local_rank if args.local_rank >= 0 else 0}
-    elif args.device_map_config_path is not None:
-        cwd = os.getcwd()
-        config_path = args.device_map_config_path if os.path.isabs(args.device_map_config_path) else os.path.join(
-            cwd, args.device_map_config_path)
-        with open(config_path, 'r') as json_file:
-            model_kwargs = {'device_map': json.load(json_file)}
+    elif args.device_map_config is not None:
+        model_kwargs = {'device_map': args.device_map_config}
     else:
         model_kwargs = {'low_cpu_mem_usage': True}
         if is_dist() and not is_ddp_plus_mp():
@@ -336,6 +332,8 @@ def llm_sft(args: SftArguments) -> Dict[str, Any]:
         quant_method=args.quant_method,
         is_training=True,
         **kwargs)
+    if hasattr(model, 'hf_device_map'):
+        logger.info(f'model.hf_device_map: {model.hf_device_map}')
     for k in ['gptq', 'awq', 'aqlm']:
         if getattr(model, f'is_{k}', None):
             args.quant_method = k
@@ -352,9 +350,9 @@ def llm_sft(args: SftArguments) -> Dict[str, Any]:
         num_beams=args.num_beams,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id)
-    logger.info(f'generation_config: {generation_config}')
     set_generation_config(model, generation_config)
-    training_args.generation_config = generation_config
+    logger.info(f'model.generation_config: {model.generation_config}')
+    training_args.generation_config = model.generation_config
 
     if use_torchacc():
         import torchacc as ta
@@ -386,7 +384,7 @@ def llm_sft(args: SftArguments) -> Dict[str, Any]:
             args.bf16,
             args.fp16,
             gradient_checkpointing=True,
-            fsdp_flatten_parameters=False)
+            fsdp_flatten_parameters=(args.sft_type == 'full'))
 
     train_dataset, val_dataset = _get_train_val_dataset(args)
     if use_torchacc():
@@ -411,6 +409,7 @@ def llm_sft(args: SftArguments) -> Dict[str, Any]:
         args.truncation_strategy,
         model=model,
         **template_kwargs)
+    template._is_training = True
     if streaming:
         template.encode = partial(template.encode, streaming=streaming)
     args.system = template.default_system
@@ -433,10 +432,19 @@ def llm_sft(args: SftArguments) -> Dict[str, Any]:
     elif not args.lazy_tokenize:
         dataset_info = {}
         if not streaming:
+            if args.preprocess_num_proc > 1:
+                use_model = TEMPLATE_MAPPING[args.template_type].get('use_model', False)
+                if use_model:
+                    args.preprocess_num_proc = 1
+                    logger.warning('The current Template does not support num_proc. '
+                                   f'Setting args.preprocess_num_proc to: {args.preprocess_num_proc}')
+                else:
+                    template.model = None
             logger.info(f'Using num_proc: {args.preprocess_num_proc}')
         train_dataset = dataset_map(train_dataset, template.encode, args.preprocess_num_proc, streaming=streaming)
         if val_dataset is not None:
             val_dataset = dataset_map(val_dataset, template.encode, args.preprocess_num_proc, streaming=streaming)
+        template.model = model
         if args.test_oom_error:
             train_dataset = sort_by_max_length(train_dataset, 20000)
         # Data analysis
@@ -517,7 +525,8 @@ def llm_sft(args: SftArguments) -> Dict[str, Any]:
                 json.dump(check_json_format(args_obj.__dict__), f, ensure_ascii=False, indent=2)
     logging_path = os.path.join(args.output_dir, 'logging.jsonl')
     logger.info(f'The logging file will be saved in: {logging_path}')
-    trainer.train(training_args.resume_from_checkpoint)
+    with template.training_context():
+        trainer.train(training_args.resume_from_checkpoint)
     last_model_checkpoint = getattr(trainer.state, 'last_model_checkpoint', None)
     logger.info(f'last_model_checkpoint: {last_model_checkpoint}')
     logger.info(f'best_model_checkpoint: {trainer.state.best_model_checkpoint}')
@@ -530,7 +539,6 @@ def llm_sft(args: SftArguments) -> Dict[str, Any]:
             logger.info(f'images_dir: {images_dir}')
             plot_images(images_dir, args.logging_dir, ['train/loss'], 0.9)
         if args.push_to_hub:
-            trainer._add_patterns_to_gitignore(['images/'])
             trainer.push_to_hub()
     run_info = {
         'memory': trainer.perf['memory'],
@@ -555,8 +563,13 @@ def llm_sft(args: SftArguments) -> Dict[str, Any]:
 
 def get_sft_main(args, llm):
     if use_torchacc():
-        logger.warning('TorchAcc is currently only available internally within Alibaba Cloud.')
         import torchacc as ta
+        import torch_xla.runtime as xr
+        xla_cache_path = os.getenv('TORCHACC_CACHE_PATH')
+        read_only = strtobool(os.getenv('TORCHACC_CACHE_PATH_READ_ONLY', '0'))
+        suffix = f'_rank{xr.global_ordinal()}'
+        if xla_cache_path and not xla_cache_path.endswith(suffix):
+            xr.initialize_cache(xla_cache_path + suffix, readonly=read_only)
         if version.parse(transformers.__version__) < version.parse('4.41.0'):
             # This patch should be called before `llm_sft`.
             ta.accelerate_hf_trainer()

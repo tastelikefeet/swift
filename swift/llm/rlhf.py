@@ -8,14 +8,14 @@ from modelscope import BitsAndBytesConfig, GenerationConfig
 from transformers import IntervalStrategy
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.utils import is_torch_npu_available
+from trl.models import create_reference_model
 
 from swift.trainers import RLHFTrainerFactory
 from swift.utils import (append_to_jsonl, check_json_format, get_dist_setting, get_logger, get_main, get_model_info,
                          is_ddp_plus_mp, is_dist, is_master, plot_images, seed_everything, show_layers)
 from .sft import _get_train_val_dataset
 from .tuner import prepare_model
-from .utils import (TEMPLATE_MAPPING, RLHFArguments, Template, get_dataset, get_model_tokenizer, get_template,
-                    get_time_info, set_generation_config)
+from .utils import RLHFArguments, Template, get_model_tokenizer, get_template, get_time_info, set_generation_config
 
 logger = get_logger()
 
@@ -41,12 +41,8 @@ def llm_rlhf(args: RLHFArguments) -> Dict[str, Any]:
         model_kwargs = {'device_map': None}
     elif is_torch_npu_available():
         model_kwargs = {'device_map': local_rank if local_rank >= 0 else 0}
-    elif args.device_map_config_path is not None:
-        cwd = os.getcwd()
-        config_path = args.device_map_config_path if os.path.isabs(args.device_map_config_path) else os.path.join(
-            cwd, args.device_map_config_path)
-        with open(config_path, 'r') as json_file:
-            model_kwargs = {'device_map': json.load(json_file)}
+    elif args.device_map_config is not None:
+        model_kwargs = {'device_map': args.device_map_config}
     else:
         model_kwargs = {'low_cpu_mem_usage': True}
         if is_dist() and not is_ddp_plus_mp():
@@ -130,8 +126,8 @@ def llm_rlhf(args: RLHFArguments) -> Dict[str, Any]:
         num_beams=args.num_beams,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id)
-    logger.info(f'generation_config: {generation_config}')
     set_generation_config(model, generation_config)
+    logger.info(f'model.generation_config: {model.generation_config}')
 
     # Preparing LoRA
     model, _ = prepare_model(model, args)
@@ -160,11 +156,13 @@ def llm_rlhf(args: RLHFArguments) -> Dict[str, Any]:
                 revision=args.model_revision,
                 quant_method=args.quant_method,
                 **kwargs)
+    elif not args.ref_model_free and args.sft_type == 'full':
+        ref_model = create_reference_model(model)
     else:
         ref_model = None
 
     if hasattr(model, 'hf_device_map'):
-        logger.info(f'model device_map {model.hf_device_map}')
+        logger.info(f'model.hf_device_map: {model.hf_device_map}')
 
     train_dataset, val_dataset = _get_train_val_dataset(args)
     if val_dataset is None:
@@ -173,24 +171,24 @@ def llm_rlhf(args: RLHFArguments) -> Dict[str, Any]:
         training_args.eval_strategy = IntervalStrategy.NO
 
     template_kwargs = {}
-    template_info = TEMPLATE_MAPPING[args.template_type]
-    use_model = template_info.get('use_model', False)
-    if use_model:
-        template_kwargs['model'] = model
+    template_kwargs['model'] = model
+    if ref_model:
+        template_kwargs['ref_model'] = ref_model
 
     if args.sequence_parallel_size and args.sequence_parallel_size > 1:
         template_kwargs['sequence_parallel_size'] = args.sequence_parallel_size
 
     template_kwargs['rescale_image'] = args.rescale_image
 
-    template: Template = get_template(
-        args.template_type, tokenizer, args.system, args.max_length, args.truncation_strategy, model=model)
+    template: Template = get_template(args.template_type, tokenizer, args.system, args.max_length,
+                                      args.truncation_strategy, **template_kwargs)
     if not template.support_multi_round and 'history' in next(iter(train_dataset)):
         logger.info(
             'The current template does not support multi-turn dialogue. The chatml template is used by default. \
     You can also use the --model_type parameter to specify the  template.')
         template: Template = get_template(
             'chatml', tokenizer, args.system, args.max_length, args.truncation_strategy, model=model)
+    template._is_training = True
     args.system = template.default_system
     logger.info(f'system: {args.system}')
 
@@ -227,7 +225,8 @@ def llm_rlhf(args: RLHFArguments) -> Dict[str, Any]:
                 json.dump(check_json_format(args_obj.__dict__), f, ensure_ascii=False, indent=2)
     logging_path = os.path.join(args.output_dir, 'logging.jsonl')
     logger.info(f'The logging file will be saved in: {logging_path}')
-    trainer.train(training_args.resume_from_checkpoint)
+    with template.training_context():
+        trainer.train(training_args.resume_from_checkpoint)
     last_model_checkpoint = getattr(trainer.state, 'last_model_checkpoint', None)
     logger.info(f'last_model_checkpoint: {last_model_checkpoint}')
     logger.info(f'best_model_checkpoint: {trainer.state.best_model_checkpoint}')
