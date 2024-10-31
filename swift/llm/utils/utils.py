@@ -37,7 +37,7 @@ from transformers.utils import is_torch_npu_available
 from swift.hub import ModelScopeConfig
 from swift.utils import get_dist_setting, get_logger, is_ddp_plus_mp, stat_array, upper_bound, use_torchacc
 from swift.utils.module_mapping import MODEL_KEYS_MAPPING, MultiModelKeys
-from .template import History, StopWords, StopWordsCriteria, Template
+from .template import History, StopWords, StopWordsCriteria, Template, GenerationProperty
 
 DATASET_TYPE = Union[HfDataset, HfIterableDataset]
 
@@ -742,11 +742,12 @@ def inference_stream(model: PreTrainedModel,
     return_dict = generation_config.return_dict_in_generate
     generation_kwargs = {'streamer': streamer, 'generation_config': generation_config, **inputs}
     result_queue = Queue()
+    generation_props: GenerationProperty = kwargs.get('generation_props')
 
     def _model_generate(*args, **kwargs):
         if is_torch_npu_available():
             torch.npu.set_device(model.device)
-        res = model.generate(*args, **kwargs)
+        res = model.generate(*args, logits_processor=generation_props.logits_processors, **kwargs)
         result_queue.put(res)
         return res
 
@@ -865,8 +866,12 @@ def inference(model: PreTrainedModel,
         else:
             print(f'[QUERY]{query}\n{output_prefix}', end='')
 
+    generation_props: GenerationProperty = kwargs.get('generation_props')
     return_dict = generation_config.return_dict_in_generate
-    generate_ids = model.generate(streamer=streamer, generation_config=generation_config, **inputs)
+    generate_ids = model.generate(streamer=streamer,
+                                  generation_config=generation_config,
+                                  logits_processor=generation_props.logits_processors,
+                                  **inputs)
     if return_dict:
         res = dict(generate_ids)
         generate_ids = generate_ids['sequences']

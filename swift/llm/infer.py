@@ -416,6 +416,9 @@ def llm_infer(args: InferArguments) -> Dict[str, List[Dict[str, Any]]]:
             else:
                 if args.stop_words:
                     infer_kwargs['stop_words'] = args.stop_words
+                example = {'query': query}
+                generation_props = template.prepare_for_generation(example, model)
+                infer_kwargs['generation_props'] = generation_props
                 if args.stream:
                     gen = inference_stream(model, template, query, history, system, **infer_kwargs)
                     print_idx = 0
