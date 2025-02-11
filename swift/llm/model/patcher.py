@@ -2,7 +2,7 @@
 from contextlib import contextmanager
 from functools import wraps
 from types import MethodType
-from typing import List
+from typing import List, Literal
 
 import torch
 import torch.nn as nn
@@ -42,10 +42,27 @@ def patch_output_clone(module: torch.nn.Module):
     module.register_forward_hook(_clone_hook)
 
 
-def patch_output_normalizer(module: torch.nn.Module):
+def patch_output_normalizer(module: torch.nn.Module, emb_index: Literal['left', 'right', 'sum', 'avg'] = 'left'):
 
     def _normalizer_hook(module, input, output):
-        output.last_hidden_state = F.normalize(output.last_hidden_state[:, 0], p=2, dim=1)
+        last_hidden_state = output.last_hidden_state
+        if emb_index == 'left':
+            last_hidden_state = output.last_hidden_state[:, 0]
+        elif emb_index == 'right':
+            assert 'attention_mask' in input
+            sequence_lengths = input['attention_mask'].sum(dim=1) - 1
+            batch_size = last_hidden_state.shape[0]
+            last_hidden_state = last_hidden_state[torch.arange(
+                batch_size, device=last_hidden_state.device
+            ), sequence_lengths]
+        elif emb_index in ('sum', 'avg'):
+            assert 'attention_mask' in input
+            last_hidden_state = last_hidden_state * input['attention_mask']
+            last_hidden_state = last_hidden_state.sum(dim=1)
+            if emb_index == 'avg':
+                last_hidden_state = last_hidden_state / input['attention_mask'].sum(dim=1)
+
+        output.last_hidden_state = F.normalize(last_hidden_state, p=2, dim=1)
         return output
 
     module.register_forward_hook(_normalizer_hook)

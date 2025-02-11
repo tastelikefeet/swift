@@ -281,7 +281,8 @@ def safe_snapshot_download(model_id_or_path: str,
 def git_clone_github(github_url: str,
                      local_repo_name: Optional[str] = None,
                      branch: Optional[str] = None,
-                     commit_hash: Optional[str] = None) -> str:
+                     commit_hash: Optional[str] = None,
+                     skip_lfs_files: bool = False) -> str:
     if github_url.endswith('.git'):
         github_url = github_url[:-4]
     git_cache_dir = os.path.join(get_cache_dir(), '_github')
@@ -293,13 +294,15 @@ def git_clone_github(github_url: str,
     with safe_ddp_context(hash_id=local_repo_path):
         if not os.path.exists(local_repo_path):
             github_url = f'{github_url}.git'
+            lfs_cmd = 'GIT_LFS_SKIP_SMUDGE=1' if skip_lfs_files else ''
+            lfs_env = {'GIT_LFS_SKIP_SMUDGE': '1'} if skip_lfs_files else {}
             command = ['git', '-C', git_cache_dir, 'clone', github_url, local_repo_name]
-            command_str = f"git -C '{git_cache_dir}' clone '{github_url}' {local_repo_name}"
+            command_str = f"{lfs_cmd} git -C '{git_cache_dir}' clone '{github_url}' {local_repo_name}"
             if branch is not None:
                 command += ['--branch', branch]
                 command_str += f' --branch {branch}'
             logger.info(f'Run the command: `{command_str}`')
-            subprocess_run(command)
+            subprocess_run(command, env=lfs_env)
 
             if commit_hash is not None:
                 git_cache_path = os.path.join(git_cache_dir, local_repo_name)

@@ -210,7 +210,9 @@ def read_multi_line(addi_prompt: str = '') -> str:
 
 def subprocess_run(command: List[str], env: Optional[Dict[str, str]] = None, stdout=None, stderr=None):
     # stdoutm stderr: e.g. subprocess.PIPE.
-    resp = subprocess.run(command, env=env, stdout=stdout, stderr=stderr)
+    _env = os.environ.copy()
+    _env.update(env or {})
+    resp = subprocess.run(command, env=_env, stdout=stdout, stderr=stderr)
     resp.check_returncode()
     return resp
 

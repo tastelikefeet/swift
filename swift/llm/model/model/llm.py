@@ -1,15 +1,22 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
-from types import MethodType
-from typing import Any, Dict
+from __future__ import annotations
 
+import os
+import sys
+from types import MethodType
+from typing import Any
+from typing import Dict, List, Optional
+
+import torch
 from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoModelForVision2Seq, AutoProcessor
 
 from swift.llm import TemplateType
 from swift.utils import get_logger
 from ..constant import LLMModelType
 from ..model_arch import ModelArch
 from ..register import Model, ModelGroup, ModelMeta, get_model_tokenizer_with_flash_attn, register_model
-from ..utils import AttnImpl, HfConfigFactory, ModelInfo, safe_snapshot_download
+from ..utils import AttnImpl, HfConfigFactory, ModelInfo, safe_snapshot_download, git_clone_github
 
 logger = get_logger()
 
@@ -277,6 +284,34 @@ register_model(
             ModelGroup([
                 Model('iic/gte_Qwen2-1.5B-instruct'),
                 Model('iic/gte_Qwen2-7B-instruct'),
+            ]),
+        ],
+        None,
+        get_model_tokenizer_qwen2_gte,
+        architectures=['Qwen2ForCausalLM']))
+
+
+def get_model_tokenizer_gme_vl(model_dir: str,
+                               model_info: ModelInfo,
+                               model_kwargs: Dict[str, Any],
+                               load_model: bool = True,
+                               **kwargs):
+    from swift.llm.model.model.qwen import get_model_tokenizer_qwen2_vl
+    model, processor = get_model_tokenizer_qwen2_vl(model_dir, model_info,
+                                                    model_kwargs, load_model,
+                                                    **kwargs)
+
+    from swift.llm.model.patcher import patch_output_normalizer
+    patch_output_normalizer(model, emb_index='right')
+    return model, processor
+
+
+register_model(
+    ModelMeta(
+        LLMModelType.qwen2_gte, [
+            ModelGroup([
+                Model('iic/gme-Qwen2-VL-2B-Instruct'),
+                Model('iic/gme-Qwen2-VL-7B-Instruct'),
             ]),
         ],
         None,
