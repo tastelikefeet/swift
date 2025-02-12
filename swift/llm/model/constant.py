@@ -126,6 +126,8 @@ class MLLMModelType:
     qwen2_vl = 'qwen2_vl'
     qwen2_5_vl = 'qwen2_5_vl'
     qwen2_audio = 'qwen2_audio'
+
+    qwen2_vl_gme = 'qwen2_vl_gme'
     qvq = 'qvq'
     ovis1_6 = 'ovis1_6'
     ovis1_6_llama3 = 'ovis1_6_llama3'

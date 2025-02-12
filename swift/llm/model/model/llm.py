@@ -13,7 +13,7 @@ from transformers import AutoModelForVision2Seq, AutoProcessor
 
 from swift.llm import TemplateType
 from swift.utils import get_logger
-from ..constant import LLMModelType
+from ..constant import LLMModelType, MLLMModelType
 from ..model_arch import ModelArch
 from ..register import Model, ModelGroup, ModelMeta, get_model_tokenizer_with_flash_attn, register_model
 from ..utils import AttnImpl, HfConfigFactory, ModelInfo, safe_snapshot_download, git_clone_github
@@ -291,6 +291,56 @@ register_model(
         architectures=['Qwen2ForCausalLM']))
 
 
+def patch_gme_forward(module):
+
+    def _forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        pooling_mask: Optional[torch.LongTensor] = None,
+        **kwargs
+    ) -> torch.Tensor:
+        if inputs_embeds is None:
+            inputs_embeds = self.base.model.embed_tokens(input_ids)
+            if pixel_values is not None:
+                pixel_values = pixel_values.type(self.base.visual.get_dtype())
+                image_embeds = self.base.visual(pixel_values, grid_thw=image_grid_thw).to(inputs_embeds.device)
+                image_mask = input_ids == self.base.config.image_token_id
+                inputs_embeds[image_mask] = image_embeds
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(inputs_embeds.device)
+
+        outputs = self.base.model(
+            input_ids=None,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+        )
+
+        pooling_mask = attention_mask if pooling_mask is None else pooling_mask
+        left_padding = (pooling_mask[:, -1].sum() == pooling_mask.shape[0])
+        if left_padding:
+            embeddings = outputs.last_hidden_state[:, -1]
+        else:
+            sequence_lengths = pooling_mask.sum(dim=1) - 1
+            batch_size = outputs.last_hidden_state.shape[0]
+            embeddings = outputs.last_hidden_state[torch.arange(
+                batch_size, device=outputs.last_hidden_state.device
+            ), sequence_lengths]
+        # normalize
+        embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
+        return embeddings.contiguous()
+
+    module._forward_origin = module.forward
+    module.forward = MethodType(_forward, module)
+
+
 def get_model_tokenizer_gme_vl(model_dir: str,
                                model_info: ModelInfo,
                                model_kwargs: Dict[str, Any],
@@ -301,19 +351,19 @@ def get_model_tokenizer_gme_vl(model_dir: str,
                                                     model_kwargs, load_model,
                                                     **kwargs)
 
-    from swift.llm.model.patcher import patch_output_normalizer
-    patch_output_normalizer(model, emb_index='right')
+    patch_gme_forward(model)
     return model, processor
 
 
 register_model(
     ModelMeta(
-        LLMModelType.qwen2_gte, [
+        MLLMModelType.qwen2_vl_gme, [
             ModelGroup([
                 Model('iic/gme-Qwen2-VL-2B-Instruct'),
                 Model('iic/gme-Qwen2-VL-7B-Instruct'),
             ]),
         ],
         None,
-        get_model_tokenizer_qwen2_gte,
-        architectures=['Qwen2ForCausalLM']))
+        get_model_tokenizer_gme_vl,
+        model_arch=ModelArch.qwen2_vl,
+        architectures=['Qwen2VLForConditionalGeneration']))
