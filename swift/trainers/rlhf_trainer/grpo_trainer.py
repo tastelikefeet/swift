@@ -4,6 +4,7 @@ import inspect
 import os
 from collections import defaultdict
 from contextlib import contextmanager
+from queue import Queue
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
@@ -40,9 +41,11 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                  *_args,
                  **kwargs):
         require_version('trl>=0.15')
-        args = kwargs['args']
-
+        from swift.trainers.rlhf_arguments import GRPOConfig
+        args: GRPOConfig = kwargs['args']
+        self.args = args
         self.processing_class = kwargs.get('template').tokenizer
+        self.queue = Queue()
         if not isinstance(reward_funcs, list):
             reward_funcs = [reward_funcs]
 
@@ -299,69 +302,14 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
         return [index_to_output[idx] for idx in sorted(index_to_output.keys())]
 
-    def _prepare_inputs(self, inputs) -> Dict[str, Union[torch.Tensor, Any]]:
+    def _prepare_input(self, data: Union[torch.Tensor, Any]) -> Union[torch.Tensor, Any]:
+        inputs, outputs, global_step = self.queue.fetch()
         device = self.accelerator.device
-        rank, local_rank, world_size, local_world_size = get_dist_setting()
-        # Generate completions using either vLLM or regular generation
-        if self.args.use_vllm or self.args.use_lmdeploy:
-            # First, have main process load weights if needed
-            if self.state.global_step != self._last_loaded_step:
-                self._move_model_to_vllm_lmdeploy()
-                self._last_loaded_step = self.state.global_step
-            # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
-            all_inputs = gather_object(inputs)
-            # Distribute inputs to different workers
-            # for example, 2 workers, 6 inputs, 0/2/4 dispatch to the first worker
-            # 1/3/5 dispatch to the second worker
-            # trying to shuffle and average the length
-            distributed_idx = self.round_robin(len(all_inputs), get_node_setting()[1] * self.args.num_infer_workers)
-            if self.infer_rank >= 0:
-                outputs = self.engine.infer(
-                    np.array(all_inputs)[distributed_idx[self.infer_rank]], self.request_config, use_tqdm=False)
-            else:
-                outputs = []
-
-            outputs = gather_object(outputs)
-            outputs = self.reorder_outputs(outputs, distributed_idx)
-
-            # Broadcast the completions from the main process to all processes, ensuring each process receives its
-            # corresponding slice.
-            # outputs = broadcast_object_list(outputs, from_process=0)
-        else:
-            # Regular generation path
-            is_multimodal = self.model.model_meta.is_multimodal
-            if is_multimodal:
-                models = self.template.remove_post_encode_hook()
-            with unwrap_model_for_generation(self.model_wrapped, self.accelerator):
-                # same reference
-                outputs = self.engine.infer(inputs, self.request_config, use_tqdm=False)
-                self.model.train()
-            if is_multimodal:
-                self.template.register_post_encode_hook(models)
-
         # Slice to keep only the local part of the data
         process_slice = slice(
             self.accelerator.process_index * len(inputs),
             (self.accelerator.process_index + 1) * len(inputs),
         )
-        if self.args.use_vllm or self.args.use_lmdeploy:
-            outputs = outputs[process_slice]
-
-        for i, output in enumerate(outputs):
-            messages = inputs[i]['messages']
-            InferRequest.remove_response(messages)
-            messages.append({'role': 'assistant', 'content': output.choices[0].message.content})
-
-        with self._template_context(self.template):
-            batched_inputs = [self.template.encode(infer_request) for infer_request in inputs]
-            outputs = to_device(self.template.data_collator(batched_inputs), self.model.device)
-
-        # we only need to compute the logits for the completion tokens
-        labels = outputs.pop('labels')
-        logits_to_keep = (labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1))).max().item()
-        outputs['logits_to_keep'] = logits_to_keep
-        outputs['completion_mask'] = labels[:, -logits_to_keep:] != -100
-
         with torch.inference_mode():
             if self.ref_model is not None:
                 ref_per_token_logps = self._get_per_token_logps(self.ref_model, outputs)
@@ -432,7 +380,67 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 df = pd.DataFrame(table)
                 wandb.log({'completions': wandb.Table(dataframe=df)})
 
-        return outputs
+    def _prefetch_inputs(self, inputs) -> Dict[str, Union[torch.Tensor, Any]]:
+        # Generate completions using either vLLM or regular generation
+        if self.args.use_vllm or self.args.use_lmdeploy:
+            # First, have main process load weights if needed
+            if self.state.global_step != self._last_loaded_step:
+                self._move_model_to_vllm_lmdeploy()
+                self._last_loaded_step = self.state.global_step
+            # Generate completions using vLLM: gather all prompts and use them in a single call in the main process
+            all_inputs = gather_object(inputs)
+            # Distribute inputs to different workers
+            # for example, 2 workers, 6 inputs, 0/2/4 dispatch to the first worker
+            # 1/3/5 dispatch to the second worker
+            # trying to shuffle and average the length
+            distributed_idx = self.round_robin(len(all_inputs), get_node_setting()[1] * self.args.num_infer_workers)
+            if self.infer_rank >= 0:
+                outputs = self.engine.infer(
+                    np.array(all_inputs)[distributed_idx[self.infer_rank]], self.request_config, use_tqdm=False)
+            else:
+                outputs = []
+
+            outputs = gather_object(outputs)
+            outputs = self.reorder_outputs(outputs, distributed_idx)
+
+            # Broadcast the completions from the main process to all processes, ensuring each process receives its
+            # corresponding slice.
+            # outputs = broadcast_object_list(outputs, from_process=0)
+        else:
+            # Regular generation path
+            is_multimodal = self.model.model_meta.is_multimodal
+            if is_multimodal:
+                models = self.template.remove_post_encode_hook()
+            with unwrap_model_for_generation(self.model_wrapped, self.accelerator):
+                # same reference
+                outputs = self.engine.infer(inputs, self.request_config, use_tqdm=False)
+                self.model.train()
+            if is_multimodal:
+                self.template.register_post_encode_hook(models)
+
+        # Slice to keep only the local part of the data
+        process_slice = slice(
+            self.accelerator.process_index * len(inputs),
+            (self.accelerator.process_index + 1) * len(inputs),
+        )
+        if self.args.use_vllm or self.args.use_lmdeploy:
+            outputs = outputs[process_slice]
+
+        for i, output in enumerate(outputs):
+            messages = inputs[i]['messages']
+            InferRequest.remove_response(messages)
+            messages.append({'role': 'assistant', 'content': output.choices[0].message.content})
+
+        with self._template_context(self.template):
+            batched_inputs = [self.template.encode(infer_request) for infer_request in inputs]
+            outputs = to_device(self.template.data_collator(batched_inputs), self.model.device)
+
+        # we only need to compute the logits for the completion tokens
+        labels = outputs.pop('labels')
+        logits_to_keep = (labels.shape[-1] - (torch.ne(labels, -100).int().argmax(-1))).max().item()
+        outputs['logits_to_keep'] = logits_to_keep
+        outputs['completion_mask'] = labels[:, -logits_to_keep:] != -100
+        self.queue.put((inputs, outputs, self.state.global_step))
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         if return_outputs:
