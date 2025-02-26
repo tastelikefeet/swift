@@ -142,7 +142,7 @@ def load_by_unsloth(args):
         try:
             from unsloth import PatchFastRL
             PatchFastRL('GRPO', UnslothModel)
-            fast_inference_params = {'fast_inference': True, 'trust_remote_code': False}
+            fast_inference_params = {**fast_inference_params, 'fast_inference': True}
         except ImportError as e:
             logger.error('You are using unsloth as GRPO\'s backend, please install `pip install unsloth -U`')
             raise e
