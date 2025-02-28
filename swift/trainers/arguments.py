@@ -80,6 +80,7 @@ class GRPOArgumentsMixin:
     vllm_enforce_eager: bool = False
     vllm_limit_mm_per_prompt: Optional[Union[dict, str]] = None  # '{"image": 5, "video": 2}'
     vllm_enable_prefix_caching: bool = True
+    tensor_parallel_size: int = 1
     # reward function args, see details in swift/plugin/orm.py
     # cosine reward, https://arxiv.org/abs/2502.03373
     cosine_min_len_value_wrong: float = 0.0  # r^w_0 in paper, Reward for wrong answers with zero completion length.
