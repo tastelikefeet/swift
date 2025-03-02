@@ -144,8 +144,8 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                         fast_infer_device = [get_device()]  # particular case when training with only 1 GPU: share it
                     else:
                         fast_infer_device = []
-                        for idx in range(get_device_count() - self.args.num_infer_workers,
-                                         self.args.tensor_parallel_size, get_device_count()):
+                        for idx in range(get_device_count() - self.args.num_infer_workers * self.args.tensor_parallel_size,
+                                         get_device_count(), self.args.tensor_parallel_size):
                             fast_infer_device.append(get_device(idx))
 
                 for _device in fast_infer_device:

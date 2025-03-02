@@ -88,10 +88,10 @@ class VllmEngine(InferEngine):
             engine_kwargs=engine_kwargs,
         )
         context, npu_context = nullcontext(), nullcontext()
-        if tensor_parallel_size == 1 and pipeline_parallel_size == 1:
-            context, npu_context = patch_vllm(), patch_npu_vllm(self.engine_args.device)
-        with context, npu_context:
-            self._prepare_engine()
+        # if tensor_parallel_size == 1 and pipeline_parallel_size == 1:
+        #     context, npu_context = patch_vllm(), patch_npu_vllm(self.engine_args.device)
+        # with context, npu_context:
+        self._prepare_engine()
         self._load_generation_config()
         self._fix_vllm_bug()
         self.patch_remove_log()
