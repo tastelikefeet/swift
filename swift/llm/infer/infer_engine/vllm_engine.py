@@ -1,5 +1,6 @@
 # Copyright (c) Alibaba, Inc. and its affiliates.
 import asyncio
+import contextlib
 import inspect
 import os
 from contextlib import nullcontext
@@ -25,64 +26,17 @@ try:
     os.environ['VLLM_ENGINE_ITERATION_TIMEOUT_S'] = '3600'
     import vllm
     from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
-    from vllm.config import VllmConfig
+    from vllm.config import VllmConfig, DeviceConfig
     from vllm.usage.usage_lib import UsageContext
     from vllm.engine.metrics_types import StatLoggerBase
     from vllm.executor.mp_distributed_executor import MultiprocessingDistributedExecutor
+    from vllm.utils import make_async
     from vllm.executor.multiproc_worker_utils import (
         ProcessWorkerWrapper, ResultHandler, WorkerMonitor,
         set_multiprocessing_worker_envs)
     from vllm.worker.worker_base import WorkerWrapperBase
 except Exception:
     raise
-
-
-class AllSyncExecutor(MultiprocessingDistributedExecutor):
-
-    def _run_workers(
-            self,
-            method: Union[str, Callable],
-            *args,
-            async_run_tensor_parallel_workers_only: bool = False,
-            max_concurrent_workers: Optional[int] = None,
-            **kwargs,
-    ) -> List[Any]:
-        if self.driver_worker is not None:
-            result_handler = ResultHandler()
-            result_handler.result_queue = self.workers[0].result_queue
-            result_handler.tasks = self.workers[0].tasks
-            worker = ProcessWorkerWrapper(result_handler,
-                                          WorkerWrapperBase,
-                                          self.vllm_config, 0)
-            self.workers.insert(0, worker)
-            self.driver_worker = None
-
-        if isinstance(method, str):
-            sent_method = method
-        else:
-            import cloudpickle
-            sent_method = cloudpickle.dumps(method)
-        del method
-
-        if max_concurrent_workers:
-            raise NotImplementedError(
-                "max_concurrent_workers is not supported yet.")
-
-        if async_run_tensor_parallel_workers_only:
-            # Run only non-driver workers and just return futures.
-            return [
-                worker.execute_method(sent_method, *args, **kwargs)
-                for worker in self.non_driver_workers
-            ]
-
-        # Start all remote workers first.
-        worker_outputs = [
-            worker.execute_method(sent_method, *args, **kwargs)
-            for worker in self.workers
-        ]
-
-        # Get the results of the workers.
-        return [output.get() for output in worker_outputs]
 
 
 class CustomWorkerAsyncLLMEngine(AsyncLLMEngine):
@@ -100,6 +54,121 @@ class CustomWorkerAsyncLLMEngine(AsyncLLMEngine):
         # Create the engine configs.
         if engine_config is None:
             engine_config = engine_args.create_engine_config(usage_context)
+
+        device = engine_args.device.split(':')
+        if len(device) > 1:
+            device = device[1]
+        device = int(device)
+        devices = []
+        for i in range(engine_args.tensor_parallel_size):
+            devices.append(str(device + i))
+
+        if engine_args.tensor_parallel_size > 1:
+            engine_args.device = 'auto'
+            engine_config.device_config = DeviceConfig(device=engine_args.device)
+
+        class AllSyncExecutor(MultiprocessingDistributedExecutor):
+
+            @staticmethod
+            @contextlib.contextmanager
+            def vllm_worker_context(devices):
+                value = os.environ.get('TORCHELASTIC_USE_AGENT_STORE', 'not_exist')
+                os.environ['TORCHELASTIC_USE_AGENT_STORE'] = 'False'
+                _device = os.environ.get('CUDA_VISIBLE_DEVICES', 'not_exist')
+                os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(devices)
+                yield
+                if value != 'not_exist':
+                    os.environ['TORCHELASTIC_USE_AGENT_STORE'] = value
+                else:
+                    os.environ.pop('TORCHELASTIC_USE_AGENT_STORE')
+                if _device != 'not_exist':
+                    os.environ['CUDA_VISIBLE_DEVICES'] = _device
+                else:
+                    os.environ.pop('CUDA_VISIBLE_DEVICES')
+
+            def _init_executor(self) -> None:
+                with AllSyncExecutor.vllm_worker_context(devices):
+                    super()._init_executor()
+
+                    def execute_model(*args, **kwargs):
+                        return self._run_worker0('execute_model', *args, **kwargs)
+
+                    self.driver_exec_model = make_async(execute_model)
+                    self.driver_worker = None
+
+            def _run_worker0(
+                    self,
+                    method: Union[str, Callable],
+                    *args,
+                    async_run_tensor_parallel_workers_only: bool = False,
+                    max_concurrent_workers: Optional[int] = None,
+                    **kwargs,
+            ) -> List[Any]:
+                if isinstance(method, str):
+                    sent_method = method
+                else:
+                    import cloudpickle
+                    sent_method = cloudpickle.dumps(method)
+                del method
+
+                if max_concurrent_workers:
+                    raise NotImplementedError(
+                        "max_concurrent_workers is not supported yet.")
+
+                if async_run_tensor_parallel_workers_only:
+                    # Run only non-driver workers and just return futures.
+                    return [
+                        worker.execute_method(sent_method, *args, **kwargs)
+                        for worker in self.non_driver_workers
+                    ]
+
+                return self.workers[0].execute_method(sent_method, *args, **kwargs)
+
+            def _run_workers(
+                    self,
+                    method: Union[str, Callable],
+                    *args,
+                    async_run_tensor_parallel_workers_only: bool = False,
+                    max_concurrent_workers: Optional[int] = None,
+                    **kwargs,
+            ) -> List[Any]:
+                if self.driver_worker is not None:
+                    with AllSyncExecutor.vllm_worker_context(devices):
+                        result_handler = ResultHandler()
+                        result_handler.result_queue = self.workers[0].result_queue
+                        result_handler.tasks = self.workers[0].tasks
+                        worker = ProcessWorkerWrapper(result_handler,
+                                                      WorkerWrapperBase,
+                                                      self.vllm_config, 0)
+                        self.workers.insert(0, worker)
+                        # self.driver_worker = None
+
+                if isinstance(method, str):
+                    sent_method = method
+                else:
+                    import cloudpickle
+                    sent_method = cloudpickle.dumps(method)
+                del method
+
+                if max_concurrent_workers:
+                    raise NotImplementedError(
+                        "max_concurrent_workers is not supported yet.")
+
+                if async_run_tensor_parallel_workers_only:
+                    # Run only non-driver workers and just return futures.
+                    return [
+                        worker.execute_method(sent_method, *args, **kwargs)
+                        for worker in self.non_driver_workers
+                    ]
+
+                # Start all remote workers first.
+                worker_outputs = [
+                    worker.execute_method(sent_method, *args, **kwargs)
+                    for worker in self.workers
+                ]
+
+                # Get the results of the workers.
+                return [output.get() for output in worker_outputs]
 
         executor_class = AllSyncExecutor
 
@@ -123,30 +192,30 @@ dtype_mapping = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.flo
 class VllmEngine(InferEngine):
 
     def __init__(
-        self,
-        model_id_or_path: str,
-        torch_dtype: Optional[torch.dtype] = None,
-        *,
-        model_type: Optional[str] = None,
-        use_hf: Optional[bool] = None,
-        hub_token: Optional[str] = None,
-        revision: Optional[str] = None,
-        # engine_kwargs
-        gpu_memory_utilization: float = 0.9,
-        tensor_parallel_size: int = 1,
-        pipeline_parallel_size: int = 1,
-        max_model_len: Optional[int] = None,
-        max_num_seqs: int = 256,
-        disable_custom_all_reduce: bool = False,
-        enforce_eager: bool = False,
-        limit_mm_per_prompt: Optional[Dict[str, Any]] = None,
-        device: str = 'auto',
-        # lora
-        enable_lora: bool = False,
-        max_loras: int = 1,
-        max_lora_rank: int = 16,
-        enable_prefix_caching: bool = False,
-        engine_kwargs: Optional[Dict[str, Any]] = None,
+            self,
+            model_id_or_path: str,
+            torch_dtype: Optional[torch.dtype] = None,
+            *,
+            model_type: Optional[str] = None,
+            use_hf: Optional[bool] = None,
+            hub_token: Optional[str] = None,
+            revision: Optional[str] = None,
+            # engine_kwargs
+            gpu_memory_utilization: float = 0.9,
+            tensor_parallel_size: int = 1,
+            pipeline_parallel_size: int = 1,
+            max_model_len: Optional[int] = None,
+            max_num_seqs: int = 256,
+            disable_custom_all_reduce: bool = False,
+            enforce_eager: bool = False,
+            limit_mm_per_prompt: Optional[Dict[str, Any]] = None,
+            device: str = 'auto',
+            # lora
+            enable_lora: bool = False,
+            max_loras: int = 1,
+            max_lora_rank: int = 16,
+            enable_prefix_caching: bool = False,
+            engine_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.processor = get_model_tokenizer(
             model_id_or_path,
@@ -176,7 +245,8 @@ class VllmEngine(InferEngine):
             engine_kwargs=engine_kwargs,
         )
         context, npu_context = nullcontext(), nullcontext()
-        context, npu_context = patch_vllm(tensor_parallel_size*pipeline_parallel_size), patch_npu_vllm(self.engine_args.device)
+        context, npu_context = patch_vllm(tensor_parallel_size * pipeline_parallel_size), patch_npu_vllm(
+            self.engine_args.device)
         with context, npu_context:
             self._prepare_engine()
         self._load_generation_config()
@@ -189,21 +259,21 @@ class VllmEngine(InferEngine):
         self.engine = engine
 
     def _prepare_engine_kwargs(
-        self,
-        gpu_memory_utilization: float = 0.9,
-        tensor_parallel_size: int = 1,
-        pipeline_parallel_size: int = 1,
-        max_model_len: Optional[int] = None,
-        max_num_seqs: int = 256,
-        disable_custom_all_reduce: bool = False,
-        enforce_eager: bool = False,
-        limit_mm_per_prompt: Optional[Dict[str, Any]] = None,
-        device: str = 'auto',
-        enable_lora: bool = False,
-        max_loras: int = 1,
-        max_lora_rank: int = 16,
-        enable_prefix_caching: bool = False,
-        engine_kwargs: Optional[Dict[str, Any]] = None,
+            self,
+            gpu_memory_utilization: float = 0.9,
+            tensor_parallel_size: int = 1,
+            pipeline_parallel_size: int = 1,
+            max_model_len: Optional[int] = None,
+            max_num_seqs: int = 256,
+            disable_custom_all_reduce: bool = False,
+            enforce_eager: bool = False,
+            limit_mm_per_prompt: Optional[Dict[str, Any]] = None,
+            device: str = 'auto',
+            enable_lora: bool = False,
+            max_loras: int = 1,
+            max_lora_rank: int = 16,
+            enable_prefix_caching: bool = False,
+            engine_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         if engine_kwargs is None:
             engine_kwargs = {}
@@ -399,11 +469,11 @@ class VllmEngine(InferEngine):
             yield ChatCompletionStreamResponse(model=self.model_name, choices=choices, usage=usage_info, id=request_id)
 
     async def _infer_full_async(
-        self,
-        template: Template,
-        inputs: Dict[str, Any],
-        generation_config: SamplingParams,
-        adapter_request: Optional[AdapterRequest] = None,
+            self,
+            template: Template,
+            inputs: Dict[str, Any],
+            generation_config: SamplingParams,
+            adapter_request: Optional[AdapterRequest] = None,
     ) -> ChatCompletionResponse:
         request_id = random_uuid()
         result_generator = self._add_request(inputs, generation_config, request_id, adapter_request=adapter_request)
@@ -432,14 +502,14 @@ class VllmEngine(InferEngine):
         return super()._batch_infer_stream(*args, **kwargs)
 
     def infer(
-        self,
-        infer_requests: List[InferRequest],
-        request_config: Optional[RequestConfig] = None,
-        metrics: Optional[List[Metric]] = None,
-        *,
-        template: Optional[Template] = None,
-        use_tqdm: Optional[bool] = None,
-        adapter_request: Optional[AdapterRequest] = None,
+            self,
+            infer_requests: List[InferRequest],
+            request_config: Optional[RequestConfig] = None,
+            metrics: Optional[List[Metric]] = None,
+            *,
+            template: Optional[Template] = None,
+            use_tqdm: Optional[bool] = None,
+            adapter_request: Optional[AdapterRequest] = None,
     ) -> List[Union[ChatCompletionResponse, Iterator[ChatCompletionStreamResponse]]]:
         return super().infer(
             infer_requests,
@@ -451,13 +521,13 @@ class VllmEngine(InferEngine):
         )
 
     async def infer_async(
-        self,
-        infer_request: InferRequest,
-        request_config: Optional[RequestConfig] = None,
-        *,
-        template: Optional[Template] = None,
-        adapter_request: Optional[AdapterRequest] = None,
-        pre_infer_hook=None,
+            self,
+            infer_request: InferRequest,
+            request_config: Optional[RequestConfig] = None,
+            *,
+            template: Optional[Template] = None,
+            adapter_request: Optional[AdapterRequest] = None,
+            pre_infer_hook=None,
     ) -> Union[ChatCompletionResponse, AsyncIterator[ChatCompletionStreamResponse]]:
         request_config = deepcopy(request_config or RequestConfig())
         if template is None:

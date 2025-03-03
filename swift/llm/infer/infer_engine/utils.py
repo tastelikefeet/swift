@@ -356,15 +356,6 @@ def patch_vllm(world_size=1):
         world_size_patch = patch('torch.distributed.get_world_size', return_value=world_size)
         profiling_patch = patch(
             'vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling', return_value=None)
-        if not hasattr(torch.distributed, 'init_process_group_origin'):
-            torch.distributed.init_process_group_origin = torch.distributed.init_process_group
-
-        def init_process_group(*arg, **kwargs):
-            import os
-            os.environ['TORCHELASTIC_USE_AGENT_STORE'] = 'False'
-            return torch.distributed.init_process_group_origin(*arg, **kwargs)
-
-        init_process_patch = patch('torch.distributed.init_process_group', new_callable=init_process_group)
 
         __origin_init__ = GroupCoordinator.__init__
 
@@ -377,8 +368,9 @@ def patch_vllm(world_size=1):
         GroupCoordinator.__init__ = __init__
 
         try:
-            with world_size_patch, init_process_patch, profiling_patch:
+            with world_size_patch, profiling_patch:
                 yield
+
         finally:
             GroupCoordinator.__init__ = __origin_init__
 
