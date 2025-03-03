@@ -4,7 +4,7 @@ import inspect
 import os
 from contextlib import nullcontext
 from copy import deepcopy
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union, Callable
 
 import torch
 from packaging import version
@@ -25,8 +25,96 @@ try:
     os.environ['VLLM_ENGINE_ITERATION_TIMEOUT_S'] = '3600'
     import vllm
     from vllm import AsyncEngineArgs, AsyncLLMEngine, SamplingParams
+    from vllm.config import VllmConfig
+    from vllm.usage.usage_lib import UsageContext
+    from vllm.engine.metrics_types import StatLoggerBase
+    from vllm.executor.mp_distributed_executor import MultiprocessingDistributedExecutor
+    from vllm.executor.multiproc_worker_utils import (
+        ProcessWorkerWrapper, ResultHandler, WorkerMonitor,
+        set_multiprocessing_worker_envs)
+    from vllm.worker.worker_base import WorkerWrapperBase
 except Exception:
     raise
+
+
+class AllSyncExecutor(MultiprocessingDistributedExecutor):
+
+    def _run_workers(
+            self,
+            method: Union[str, Callable],
+            *args,
+            async_run_tensor_parallel_workers_only: bool = False,
+            max_concurrent_workers: Optional[int] = None,
+            **kwargs,
+    ) -> List[Any]:
+        if self.driver_worker is not None:
+            result_handler = ResultHandler()
+            result_handler.result_queue = self.workers[0].result_queue
+            result_handler.tasks = self.workers[0].tasks
+            worker = ProcessWorkerWrapper(result_handler,
+                                          WorkerWrapperBase,
+                                          self.vllm_config, 0)
+            self.workers.insert(0, worker)
+            self.driver_worker = None
+
+        if isinstance(method, str):
+            sent_method = method
+        else:
+            import cloudpickle
+            sent_method = cloudpickle.dumps(method)
+        del method
+
+        if max_concurrent_workers:
+            raise NotImplementedError(
+                "max_concurrent_workers is not supported yet.")
+
+        if async_run_tensor_parallel_workers_only:
+            # Run only non-driver workers and just return futures.
+            return [
+                worker.execute_method(sent_method, *args, **kwargs)
+                for worker in self.non_driver_workers
+            ]
+
+        # Start all remote workers first.
+        worker_outputs = [
+            worker.execute_method(sent_method, *args, **kwargs)
+            for worker in self.workers
+        ]
+
+        # Get the results of the workers.
+        return [output.get() for output in worker_outputs]
+
+
+class CustomWorkerAsyncLLMEngine(AsyncLLMEngine):
+
+    @classmethod
+    def from_engine_args(
+            cls,
+            engine_args: AsyncEngineArgs,
+            engine_config: Optional[VllmConfig] = None,
+            start_engine_loop: bool = True,
+            usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+            stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+    ) -> "AsyncLLMEngine":
+        """Creates an async LLM engine from the engine arguments."""
+        # Create the engine configs.
+        if engine_config is None:
+            engine_config = engine_args.create_engine_config(usage_context)
+
+        executor_class = AllSyncExecutor
+
+        # Create the async LLM engine.
+        engine = cls(
+            vllm_config=engine_config,
+            executor_class=executor_class,
+            log_requests=not engine_args.disable_log_requests,
+            log_stats=not engine_args.disable_log_stats,
+            start_engine_loop=start_engine_loop,
+            usage_context=usage_context,
+            stat_loggers=stat_loggers,
+        )
+        return engine
+
 
 logger = get_logger()
 dtype_mapping = {torch.float16: 'float16', torch.bfloat16: 'bfloat16', torch.float32: 'float32'}
@@ -88,17 +176,16 @@ class VllmEngine(InferEngine):
             engine_kwargs=engine_kwargs,
         )
         context, npu_context = nullcontext(), nullcontext()
-        if tensor_parallel_size == 1 and pipeline_parallel_size == 1:
-            context, npu_context = patch_vllm(), patch_npu_vllm(self.engine_args.device)
+        context, npu_context = patch_vllm(tensor_parallel_size*pipeline_parallel_size), patch_npu_vllm(self.engine_args.device)
         with context, npu_context:
-        self._prepare_engine()
+            self._prepare_engine()
         self._load_generation_config()
         self._fix_vllm_bug()
         self.patch_remove_log()
 
     def _prepare_engine(self) -> None:
         with patch_auto_tokenizer(self.tokenizer), patch_auto_config(self.config):
-            engine = AsyncLLMEngine.from_engine_args(self.engine_args)
+            engine = CustomWorkerAsyncLLMEngine.from_engine_args(self.engine_args)
         self.engine = engine
 
     def _prepare_engine_kwargs(

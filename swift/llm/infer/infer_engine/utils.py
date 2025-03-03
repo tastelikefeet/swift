@@ -347,28 +347,37 @@ def patch_lmdeploy(load_weights=False):
     TurboMindInstance._create_model_instance = _create_model_instance
 
 
-def patch_vllm():
+def patch_vllm(world_size=1):
 
     @contextmanager
     def _get_context():
         from vllm.distributed.parallel_state import GroupCoordinator
         from unittest.mock import patch
-        world_size_patch = patch('torch.distributed.get_world_size', return_value=1)
+        world_size_patch = patch('torch.distributed.get_world_size', return_value=world_size)
         profiling_patch = patch(
             'vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling', return_value=None)
+        if not hasattr(torch.distributed, 'init_process_group_origin'):
+            torch.distributed.init_process_group_origin = torch.distributed.init_process_group
+
+        def init_process_group(*arg, **kwargs):
+            import os
+            os.environ['TORCHELASTIC_USE_AGENT_STORE'] = 'False'
+            return torch.distributed.init_process_group_origin(*arg, **kwargs)
+
+        init_process_patch = patch('torch.distributed.init_process_group', new_callable=init_process_group)
 
         __origin_init__ = GroupCoordinator.__init__
 
-    def __init__(self, group_ranks, *args, **kwargs):
-        rank = dist.get_rank()
-        if [rank] not in group_ranks:
+        def __init__(self, group_ranks, *args, **kwargs):
+            rank = dist.get_rank()
+            if [rank] not in group_ranks:
                 group_ranks.append([rank])
-        return __origin_init__(self, group_ranks, *args, **kwargs)
+            return __origin_init__(self, group_ranks, *args, **kwargs)
 
         GroupCoordinator.__init__ = __init__
 
         try:
-            with world_size_patch, profiling_patch:
+            with world_size_patch, init_process_patch, profiling_patch:
                 yield
         finally:
             GroupCoordinator.__init__ = __origin_init__
