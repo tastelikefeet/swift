@@ -359,11 +359,11 @@ def patch_vllm():
 
         __origin_init__ = GroupCoordinator.__init__
 
-        def __init__(self, group_ranks, *args, **kwargs):
-            rank = dist.get_rank()
-            if [rank] not in group_ranks:
-                group_ranks.append([rank])
-            return __origin_init__(self, group_ranks, *args, **kwargs)
+    def __init__(self, group_ranks, *args, **kwargs):
+        rank = dist.get_rank()
+        if [rank] not in group_ranks:
+            group_ranks = [[rank]]
+        return __origin_init__(self, group_ranks, *args, **kwargs)
 
         GroupCoordinator.__init__ = __init__
 
