@@ -344,6 +344,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             parameters.append(llm_embeds)
         if non_llm_parameters:
             parameters.append(non_llm_parameters)
+        parameters = [p for p in parameters if p]
         return parameters, [remove_lora(p_list) for p_list in parameters]
 
     def prepare_vllm(self, model, fast_infer_device):
