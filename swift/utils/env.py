@@ -23,6 +23,28 @@ def use_torchacc() -> bool:
     return strtobool(os.getenv('USE_TORCHACC', '0'))
 
 
+_SEQUENCE_PARALLEL_GROUP = 0
+
+
+def initialize_model_parallel(
+    sequence_parallel_size
+):
+    rank, local_rank, world_size, local_world_size = get_dist_setting()
+    num_sequence_parallel_groups: int = world_size // sequence_parallel_size
+
+    global _SEQUENCE_PARALLEL_GROUP
+    for i in range(num_sequence_parallel_groups):
+        ranks = range(i * sequence_parallel_size,
+                      (i + 1) * sequence_parallel_size)
+        group = torch.distributed.new_group(ranks)
+        if rank in ranks:
+            _SEQUENCE_PARALLEL_GROUP = group
+
+
+def get_sequence_parallel_group():
+    return _SEQUENCE_PARALLEL_GROUP
+
+
 def get_dist_setting() -> Tuple[int, int, int, int]:
     """return rank, local_rank, world_size, local_world_size"""
     rank = int(os.getenv('RANK', -1))

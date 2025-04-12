@@ -44,6 +44,17 @@ def apply_liger(model_type: str):
         raise ValueError(f'Unsupported liger model_type: {model_type}')
 
 
+def apply_ulysses(sequence_parallel_size):
+    from swift.utils.env import initialize_model_parallel, get_sequence_parallel_group
+    from deepspeed.sequence.layer import DistributedAttention
+    initialize_model_parallel(sequence_parallel_size)
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+    ALL_ATTENTION_FUNCTIONS['flash_attention_2'] = DistributedAttention(
+        ALL_ATTENTION_FUNCTIONS['flash_attention_2'], get_sequence_parallel_group())
+    ALL_ATTENTION_FUNCTIONS['sdpa'] = DistributedAttention(
+        ALL_ATTENTION_FUNCTIONS['sdpa'], get_sequence_parallel_group())
+
+
 def get_multimodal_target_regex(
     model_arch,
     *,
@@ -342,6 +353,8 @@ class TunerMixin:
         if args.use_liger_kernel and 'use_liger_kernel' not in inspect.signature(TrainingArguments).parameters:
             # Apply liger
             apply_liger(args.model_type)
+        if args.sequence_parallel_size > 1:
+            apply_ulysses(args.sequence_parallel_size)
 
         if args.is_adapter:
             if args.tuner_backend != 'unsloth' and args.train_type not in extra_tuners:
