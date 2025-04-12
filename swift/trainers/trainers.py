@@ -115,41 +115,37 @@ class Seq2SeqTrainer(SwiftMixin, HfSeq2SeqTrainer):
             self.template.set_mode(origin_mode)
 
     def get_train_dataloader(self):
-        if self.template.sequence_parallel_size == 1:
-            # Higher efficiency
-            if self.train_dataset is None:
-                raise ValueError('Trainer: training requires a train_dataset.')
-            args = self.args
-            train_dataset = self.train_dataset
+        # Higher efficiency
+        if self.train_dataset is None:
+            raise ValueError('Trainer: training requires a train_dataset.')
+        args = self.args
+        train_dataset = self.train_dataset
 
-            dataloader_params = {
-                'collate_fn': self.data_collator,
-                'num_workers': args.dataloader_num_workers,
-                'pin_memory': args.dataloader_pin_memory,
-                'persistent_workers': args.dataloader_persistent_workers,
-                'prefetch_factor': args.dataloader_prefetch_factor
-            }
-            batch_sampler_params = {
-                'drop_last': args.dataloader_drop_last,
-                'shuffle': args.train_dataloader_shuffle,
-                'data_seed': args.data_seed,
-            }
+        dataloader_params = {
+            'collate_fn': self.data_collator,
+            'num_workers': args.dataloader_num_workers,
+            'pin_memory': args.dataloader_pin_memory,
+            'persistent_workers': args.dataloader_persistent_workers,
+            'prefetch_factor': args.dataloader_prefetch_factor
+        }
+        batch_sampler_params = {
+            'drop_last': args.dataloader_drop_last,
+            'shuffle': args.train_dataloader_shuffle,
+            'data_seed': args.data_seed,
+        }
 
-            if hasattr(train_dataset, '__len__'):
-                batch_sampler = BatchSamplerShard(
-                    len(train_dataset), batch_size=self._train_batch_size, **batch_sampler_params)
-                dataloader = DataLoaderShard(train_dataset, batch_sampler, **dataloader_params)
-            else:
-                # IterableDataset
-                if dist.is_initialized():
-                    dataloader_params['prefetch_factor'] = dataloader_params['prefetch_factor'] * dist.get_world_size()
-                dataloader = DataLoader(train_dataset, batch_size=self._train_batch_size, **dataloader_params)
-                dataloader = DataLoaderDispatcher(dataloader)
-
-            return dataloader
+        if hasattr(train_dataset, '__len__'):
+            batch_sampler = BatchSamplerShard(
+                len(train_dataset), batch_size=self._train_batch_size, **batch_sampler_params)
+            dataloader = DataLoaderShard(train_dataset, batch_sampler, **dataloader_params)
         else:
-            from swift.trainers.xtuner import get_xtuner_train_dataloader
-            return get_xtuner_train_dataloader(self)
+            # IterableDataset
+            if dist.is_initialized():
+                dataloader_params['prefetch_factor'] = dataloader_params['prefetch_factor'] * dist.get_world_size()
+            dataloader = DataLoader(train_dataset, batch_size=self._train_batch_size, **dataloader_params)
+            dataloader = DataLoaderDispatcher(dataloader)
+
+        return dataloader
 
     def evaluate(self, *args, **kwargs):
         context = self._patch_predict_with_generate() if self.args.predict_with_generate else nullcontext()
@@ -234,10 +230,6 @@ class Seq2SeqTrainer(SwiftMixin, HfSeq2SeqTrainer):
                 loss = self.label_smoother(outputs, labels, shift_labels=True)
             else:
                 loss = self.label_smoother(outputs, labels)
-
-        if self.template.sequence_parallel_size > 1:
-            from swift.trainers.xtuner import reduce_xtuner_sequence_parallel_loss
-            loss = reduce_xtuner_sequence_parallel_loss(loss, labels)
 
         if getattr(self.args, 'average_tokens_across_devices', False) and self.model_accepts_loss_kwargs:
             loss *= self.accelerator.num_processes
