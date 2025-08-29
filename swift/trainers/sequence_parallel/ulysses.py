@@ -188,81 +188,27 @@ class SequenceParallel:
             text_model = base_model
 
         from transformers.modeling_flash_attention_utils import is_flash_attn_available
-        if is_flash_attn_available():
-            # TODO this works for multi-modal models like qwen2.5-vl
-            # SDPA is not supported, because we need to copy the code to our project, which will bring
-            # more works for maintaining.
-            from transformers import modeling_flash_attention_utils
-            from transformers.modeling_flash_attention_utils import _flash_attention_forward
-            _distributed_flash_attention = DistributedAttention(_flash_attention_forward, self.sp_group)
-
-            def flash_attention_forward(query_states: torch.Tensor, key_states: torch.Tensor,
-                                        value_states: torch.Tensor, attention_mask: Optional[torch.Tensor], q_len,
-                                        *args, **kwargs):
-                return _distributed_flash_attention(query_states, key_states, value_states, attention_mask,
-                                                    q_len * self.sp_world_size, *args, **kwargs)
-
-            modeling_flash_attention_utils._flash_attention_forward = flash_attention_forward
 
         from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-        def local_flash_attn(module: torch.nn.Module, query_states, key_states, value_states, attention_mask, *args,
-                             dist_attn, **kwargs):
+        def local_flash_attn(module: torch.nn.Module, query_states, key_states, value_states, attention_mask, *args, **kwargs):
             if module.__class__ not in [m.__class__ for m in text_model.modules()]:
                 return ALL_ATTENTION_FUNCTIONS['flash_attention_2_origin'](module, query_states, key_states,
                                                                            value_states, attention_mask, *args,
                                                                            **kwargs)
-            if dist_attn.local_attn is None:
-
-                def _attention(query, key, value, *args, **kwargs):
-                    query = query.transpose(1, 2)
-                    key = key.transpose(1, 2)
-                    value = value.transpose(1, 2)
-                    if self.rp_world_size is not None and self.rp_world_size > 1:
-                        from .zigzag_ring_flash_attn import zigzag_ring_flash_attn_func
-                        output = zigzag_ring_flash_attn_func(query.transpose(1, 2), key.transpose(1, 2), value.transpose(1, 2),
-                                                             causal=module.is_causal,
-                                                             dropout_p=kwargs.get('dropout', 0.0),
-                                                             softmax_scale=kwargs.get('scaling', 0.0),
-                                                             window_size=kwargs.get('sliding_window') or (-1, -1),
-                                                             group=self.rp_group)
-                        return output
-                    else:
-                        return ALL_ATTENTION_FUNCTIONS['flash_attention_2_origin'](module, query, key,
-                                                                                   value, *args, **kwargs)[0]
-
-                dist_attn.local_attn = _attention
-
-            return dist_attn(
-                query_states.transpose(1, 2), key_states.transpose(1, 2), value_states.transpose(1, 2), attention_mask,
-                *args, **kwargs), None
-
-        def local_sdpa_attn(module: torch.nn.Module, query_states, key_states, value_states, attention_mask, *args,
-                            dist_attn, **kwargs):
-            if module.__class__ not in [m.__class__ for m in text_model.modules()]:
-                return ALL_ATTENTION_FUNCTIONS['sdpa_origin'](module, query_states, key_states, value_states,
-                                                              attention_mask, *args, **kwargs)
-            if dist_attn.local_attn is None:
-
-                def _attention(query, key, value, *args, **kwargs):
-                    query = query.transpose(1, 2)
-                    key = key.transpose(1, 2)
-                    value = value.transpose(1, 2)
-                    if self.rp_world_size > 1:
-                        raise NotImplementedError(f'SDPA does not support Ring attention!')
-                    return ALL_ATTENTION_FUNCTIONS['sdpa_origin'](module, query, key, value, *args, **kwargs)[0]
-
-                dist_attn.local_attn = _attention
-            return dist_attn(
-                query_states.transpose(1, 2), key_states.transpose(1, 2), value_states.transpose(1, 2), attention_mask,
-                *args, **kwargs), None
+            if self.rp_world_size is not None and self.rp_world_size > 1:
+                # from .zigzag_ring_flash_attn import zigzag_ring_flash_attn_func
+                from .ring_flash_attn import ring_flash_attn_func
+                output = ring_flash_attn_func(query_states.transpose(1,2), key_states.transpose(1,2), value_states.transpose(1,2),
+                                                        causal=module.is_causal,
+                                                        dropout_p=kwargs.get('dropout', 0.0),
+                                                        softmax_scale=kwargs.get('scaling', 0.0),
+                                                        window_size=kwargs.get('sliding_window') or (-1, -1),
+                                                        group=self.rp_group)
+                return output, None
 
         ALL_ATTENTION_FUNCTIONS['flash_attention_2_origin'] = ALL_ATTENTION_FUNCTIONS['flash_attention_2']
-        ALL_ATTENTION_FUNCTIONS['sdpa_origin'] = ALL_ATTENTION_FUNCTIONS['sdpa']
-        ALL_ATTENTION_FUNCTIONS['flash_attention_2'] = partial(
-            local_flash_attn, dist_attn=DistributedAttention(None, self.sp_group))
-        ALL_ATTENTION_FUNCTIONS['sdpa'] = partial(
-            local_sdpa_attn, dist_attn=DistributedAttention(None, self.sp_group))
+        ALL_ATTENTION_FUNCTIONS['flash_attention_2'] = local_flash_attn
 
     def _prepare_forward_hook(self, base_model: torch.nn.Module):
 
@@ -343,10 +289,14 @@ class SequenceParallel:
     def _pad(self, tensor, padding_value, dim=-1):
         """Pad tensor for sequence parallel"""
         length = tensor.shape[dim]
-        if length % self.world_size == 0:
+        if self.rp_world_size > 1:
+            world_size = self.world_size * 2
+        else:
+            world_size = self.world_size
+        if length % world_size == 0:
             return tensor
 
-        pad_num = self.world_size - (length % self.world_size)
+        pad_num = world_size - (length % world_size)
         if not isinstance(padding_value, torch.Tensor):
             # ids
             pad_shape = ((*tensor.shape[:dim], pad_num, *tensor.shape[dim + 1:]) if dim != -1 else
@@ -364,40 +314,12 @@ class SequenceParallel:
             return local_output
 
         if self.rp_world_size > 1:
-            input_dim = local_output.dim()
-            assert input_dim >= 2
-
-            batch_size, local_seq_len, *rest = local_output.shape
-
-            # Step 1: Gather from all sequence parallel ranks
-            # Each sp_rank has its own piece, we need to gather them first
-            gathered_sp = [torch.zeros_like(local_output) for _ in range(self.sp_world_size)]
-            torch.distributed.all_gather(gathered_sp, local_output.contiguous(), group=self.sp_group)
-
-            # Concatenate the sp pieces to form the complete chunk for this rp_rank
-            rp_chunk = torch.cat(gathered_sp, dim=dim)
-
-            # Step 2: Gather all rp chunks
-            gathered_rp = [torch.zeros_like(rp_chunk) for _ in range(self.rp_world_size)]
-            torch.distributed.all_gather(gathered_rp, rp_chunk, group=self.rp_group)
-
-            # Step 3: Reconstruct the original tensor by unfolding the Z-pattern
-            # We need to separate each rp chunk into two parts as per the original pattern
-            full_seq_len = local_seq_len * self.world_size
-            chunk_size = full_seq_len // (2 * self.rp_world_size)
-
-            # Initialize the full output tensor
-            full_output = torch.zeros([batch_size, full_seq_len, *rest], device=local_output.device)
-
-            # Place each chunk in its correct position
-            for i in range(self.rp_world_size):
-                # In the original split, rank i got chunk[i] and chunk[2*rp_world_size-i-1]
-                # Now we need to place them back
-                full_output[:, i * chunk_size:(i + 1) * chunk_size] = gathered_rp[i][:, :chunk_size]
-                full_output[:, (2 * self.rp_world_size - i - 1) * chunk_size:(2 * self.rp_world_size - i) * chunk_size] = \
-                gathered_rp[i][:, chunk_size:]
-
-            return full_output.contiguous()
+            gathered_sp = torch.empty((local_output.shape[0] * self.rp_world_size, local_output.shape[1]),
+                                       dtype=local_output.dtype,
+                                       device=local_output.device)
+            dist.all_gather_into_tensor(gathered_sp, local_output, group=self.rp_group)
+            gathered_sp = torch.cat(gathered_sp.split(local_output.shape[0], dim=0), dim=dim)
+            return gathered_sp.contiguous()
         else:
             gathered_sp = torch.empty((local_output.shape[0] * self.sp_world_size, local_output.shape[1]),
                                        dtype=local_output.dtype,
@@ -412,29 +334,14 @@ class SequenceParallel:
             return input
 
         if self.rp_world_size > 1:
-            input_dim = input.dim()
-            assert input_dim >= 2
-            pre_dims = []
-            post_dims = []
-            seq_len = -1
-            if dim < 0:
-                dim = len(input.shape) + dim
-            for idx, d in enumerate(input.shape):
-                if idx == dim:
-                    seq_len = d
-                elif idx < dim:
-                    pre_dims.append(d)
-                else:
-                    post_dims.append(d)
+            rank = self.rp_rank
+            dim_size = input.size(dim)
+            assert dim_size % self.rp_world_size == 0, (f'The dimension to split ({dim_size}) is not a multiple of '
+                                                        f'world size ({self.rp_world_size}), cannot split tensor evenly')
 
-            value_chunks = input.chunk(2 * self.rp_world_size, dim=dim)
-
-            local_value = torch.cat(
-                [value_chunks[self.rp_rank], value_chunks[2 * self.rp_world_size - self.rp_rank - 1]], dim=dim
-            ).chunk(self.sp_world_size, dim=dim)[self.sp_rank]
-
-            new_shape = pre_dims + [seq_len // self.world_size] + post_dims
-            return local_value.reshape(new_shape).contiguous()
+            tensor_list = torch.split(input, dim_size // self.rp_world_size, dim=dim)
+            output = tensor_list[rank].contiguous()
+            return output
         else:
             rank = self.sp_rank
             dim_size = input.size(dim)
@@ -498,7 +405,7 @@ class SequenceParallel:
         """Initialize device mesh for sequence parallel"""
         rank, local_rank, world_size, local_world_size = get_dist_setting()
         self.dp_world_size = world_size // self.sp_world_size
-        rp_world_size = self.sp_world_size // self.num_heads
+        rp_world_size = self.sp_world_size
         if rp_world_size <= 1:
             # Create device mesh: (dp_world_size, sp_world_size)
             self.device_mesh = init_device_mesh(
@@ -508,14 +415,14 @@ class SequenceParallel:
             self.rp_world_size = rp_world_size
             self.world_size = self.sp_world_size
         else:
-            self.sp_world_size = self.num_heads
+            self.sp_world_size = 1
             self.rp_world_size = rp_world_size
             self.world_size = self.rp_world_size * self.sp_world_size
             # Create device mesh: (dp_world_size, rp_world_size, sp_world_size)
             self.device_mesh = init_device_mesh(
                 get_device().split(':')[0],
-                mesh_shape=(self.dp_world_size, self.rp_world_size, self.sp_world_size),
-                mesh_dim_names=('data', 'ring', 'sequence'))
+                mesh_shape=(self.dp_world_size, self.rp_world_size),
+                mesh_dim_names=('data', 'ring'))
 
     @property
     def sp_group(self):
