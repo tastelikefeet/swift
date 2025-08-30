@@ -204,7 +204,8 @@ class SequenceParallel:
                                                         dropout_p=kwargs.get('dropout', 0.0),
                                                         softmax_scale=kwargs.get('scaling', 0.0),
                                                         window_size=kwargs.get('sliding_window') or (-1, -1),
-                                                        group=self.rp_group)
+                                                        group=self.rp_group,
+                                                        layer_idx=module.layer_idx)
                 return output, None
 
         ALL_ATTENTION_FUNCTIONS['flash_attention_2_origin'] = ALL_ATTENTION_FUNCTIONS['flash_attention_2']
