@@ -326,9 +326,6 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         # model accepts loss-related kwargs. Since we compute our own loss, this check is irrelevant. We set
         # self.model_accepts_loss_kwargs to False to enable scaling.
         self.model_accepts_loss_kwargs = False
-        self.padding_free = self.template.padding_free
-        self.template.padding_free = False
-        self.template.packing = False
         for i, reward_func in enumerate(self.reward_funcs):
             if isinstance(reward_func, PreTrainedModel):
                 if self.is_deepspeed_enabled:
@@ -532,6 +529,8 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         max_num_seqs = (
             self.args.per_device_train_batch_size * self.vllm_tensor_parallel_size * self.args.steps_per_generation)
         with Swift.grpo_context(model, self.template.processor):
+            padding_free = self.template.padding_free
+            self.template.padding_free = False
             engine = GRPOVllmEngine(
                 model.model_dir,
                 model.model_info.torch_dtype,
@@ -551,6 +550,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                 template=copy(self.template),
                 distributed_executor_backend='external_launcher',
             )
+            self.template.padding_free = padding_free
         return engine
 
     @contextmanager
@@ -1701,25 +1701,6 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
     @contextmanager
     def padding_free_context(self, model: torch.nn.Module):
-        ctx = {}
-
-        def _padding_free_input_hook(module, args, kwargs):
-            attention_mask = kwargs['attention_mask']
-            # used in _padding_free_output_hook
-            ctx['padding_left'] = (attention_mask[:, -1].sum() == attention_mask.shape[0])
-            if 'input_ids' in kwargs and kwargs.get('input_ids') is not None:
-                # llm models
-                kwargs['position_ids'] = torch.arange(kwargs['input_ids'].shape[1]).unsqueeze(0).repeat(
-                    kwargs['input_ids'].shape[0], 1).to(kwargs['input_ids'].dtype).to(kwargs['input_ids'].device)
-                kwargs['input_ids'] = kwargs['input_ids'][attention_mask.bool()].unsqueeze(0)
-            else:
-                # mllm models
-                kwargs['position_ids'] = torch.arange(kwargs['inputs_embeds'].shape[1]).unsqueeze(0).repeat(
-                    kwargs['inputs_embeds'].shape[0], 1).to(torch.int64).to(kwargs['inputs_embeds'].device)
-                kwargs['inputs_embeds'] = kwargs['inputs_embeds'][attention_mask.bool()].unsqueeze(0)
-            kwargs['position_ids'] = kwargs['position_ids'][attention_mask.bool()].unsqueeze(0)
-            kwargs.pop('attention_mask', None)
-            return args, kwargs
 
         def _padding_free_output_hook(module, args, kwargs, result):
             position_ids = kwargs['position_ids']
@@ -1749,7 +1730,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
                     (max_length - length,
                      last_hidden_state.shape[-1])).to(last_hidden_state.dtype).to(last_hidden_state.device)
                 # re-padding
-                if ctx['padding_left']:
+                if self.template.padding_side == 'left':
                     seq_state = torch.cat((padding, seq_state), dim=0)
                 else:
                     seq_state = torch.cat((seq_state, padding), dim=0)
@@ -1760,32 +1741,16 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
         if self.padding_free:
             llm_model = get_llm_model(model)
-            remove_handle1 = llm_model.register_forward_pre_hook(
-                _padding_free_input_hook, with_kwargs=True, prepend=True)
             remove_handle2 = llm_model.register_forward_hook(_padding_free_output_hook, with_kwargs=True, prepend=True)
         yield
         if self.padding_free:
-            remove_handle1.remove()
             remove_handle2.remove()
 
     @contextmanager
     def padding_free_context_grpo(self, model: torch.nn.Module):
         """Padding free context for GRPO sequence parallel training"""
-        ctx = {}
 
         def _padding_free_input_hook(module, args, kwargs):
-            attention_mask = kwargs['attention_mask']
-            ctx['padding_left'] = (attention_mask[:, -1].sum() == attention_mask.shape[0])
-            if 'input_ids' in kwargs and kwargs.get('input_ids') is not None:
-                kwargs['position_ids'] = torch.arange(kwargs['input_ids'].shape[1]).unsqueeze(0).repeat(
-                    kwargs['input_ids'].shape[0], 1).to(kwargs['input_ids'].dtype).to(kwargs['input_ids'].device)
-                kwargs['input_ids'] = kwargs['input_ids'][attention_mask.bool()].unsqueeze(0)
-            else:
-                kwargs['position_ids'] = torch.arange(kwargs['inputs_embeds'].shape[1]).unsqueeze(0).repeat(
-                    kwargs['inputs_embeds'].shape[0], 1).to(torch.int64).to(kwargs['inputs_embeds'].device)
-                kwargs['inputs_embeds'] = kwargs['inputs_embeds'][attention_mask.bool()].unsqueeze(0)
-            kwargs['position_ids'] = kwargs['position_ids'][attention_mask.bool()].unsqueeze(0)
-            kwargs.pop('attention_mask', None)
             from swift.trainers.sequence_parallel import sequence_parallel
             # no labels, but set new position_ids
             sequence_parallel.prepare_inputs(kwargs)
@@ -1822,7 +1787,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
             for length in seq_lengths:
                 seq_state = logits[start:start + length]
                 padding = torch.zeros((max_length - length, ), dtype=logits.dtype, device=logits.device)
-                if ctx['padding_left']:
+                if self.template.padding_side == 'left':
                     seq_state = torch.cat((padding, seq_state), dim=0)
                 else:
                     seq_state = torch.cat((seq_state, padding), dim=0)
@@ -1830,7 +1795,7 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
 
                 if has_entropies:
                     ent_state = entropies[start:start + length]
-                    if ctx['padding_left']:
+                    if self.template.padding_side == 'left':
                         ent_state = torch.cat((padding, ent_state), dim=0)
                     else:
                         ent_state = torch.cat((ent_state, padding), dim=0)
