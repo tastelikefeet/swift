@@ -253,6 +253,9 @@ class GRPOTrainer(RLHFTrainerMixin, SwiftMixin, HFGRPOTrainer):
         self.enable_server_multi_turn = False
         # for multi-turn server, maybe the num of rollout outputs is not equal to the num of rollout inputs
         self.dynamic_num_samples = False
+        self.padding_free = self.template.padding_free
+        self.template.padding_free = False
+        self.template.packing = False
         if self.use_vllm:
             if not is_vllm_available():
                 raise ImportError('vLLM is not available and `use_vllm` is set to True. '
